@@ -1,9 +1,10 @@
 # Lang Teacher Agent
 
-Lang Teacher Agent is an AI-powered tutor that helps learners practice the Greek language. The application currently exposes its functionality through a Telegram bot and is built with Python, Docker, and PostgreSQL.
+Lang Teacher Agent is an AI-powered tutor that helps learners practise the Greek language. The application exposes its functionality through a Telegram bot and is built with Python, Docker, and PostgreSQL.
 
 ## Overview
-- Telegram bot that echoes user messages for now, providing the scaffolding for conversational learning flows.
+- Telegram bot that connects to OpenAI's Responses API to deliver explanations, translations, and pronunciation guidance.
+- Remembers the last five user messages and assistant replies per chat so learners can ask follow-up questions without repeating context.
 - Configurable through environment variables stored in `.env` or provided at runtime.
 - Docker Compose environment that bundles the application and PostgreSQL for local development.
 - Continuous integration workflow defined in GitHub Actions.
@@ -22,7 +23,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Update `.env` (or your shell environment) with a valid `TELEGRAM_BOT_TOKEN`, then start the application:
+Update `.env` (or your shell environment) with valid `TELEGRAM_BOT_TOKEN` and `OPENAI_API_KEY` values, then start the application:
 
 ```bash
 python -m src.main
