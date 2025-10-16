@@ -1,6 +1,7 @@
 import logging
 import os
-from typing import Final
+from collections import deque
+from typing import Deque, Dict, Final, List, Tuple
 
 from openai import AsyncOpenAI
 from telegram import Update
@@ -48,19 +49,46 @@ def extract_output_text(response: object) -> str:
 class GreekTeacherAgent:
     """Handles Telegram messages by delegating to an OpenAI Greek teacher model."""
 
-    def __init__(self, client: AsyncOpenAI, model: str, system_prompt: str) -> None:
+    def __init__(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        system_prompt: str,
+        history_size: int = 5,
+    ) -> None:
         self._client = client
         self._model = model
         self._system_prompt = system_prompt
+        self._history_size = history_size
+        self._history: Dict[int, Deque[Tuple[str, str]]] = {}
 
-    async def _generate_response(self, user_message: str) -> str:
+    def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
+        """Return the rolling history buffer for a chat, creating it when needed."""
+        history = self._history.get(chat_id)
+        if history is None:
+            history = deque(maxlen=self._history_size)
+            self._history[chat_id] = history
+        return history
+
+    def _record_interaction(self, chat_id: int, user_message: str, assistant_reply: str) -> None:
+        """Persist the most recent user/assistant exchange for the chat."""
+        history = self._get_history(chat_id)
+        history.append((user_message, assistant_reply))
+
+    def _build_messages(self, chat_id: int, user_message: str) -> List[Dict[str, str]]:
+        """Compose the conversation context to send to the OpenAI Responses API."""
+        messages: List[Dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
+        for previous_user_message, previous_reply in self._get_history(chat_id):
+            messages.append({"role": "user", "content": previous_user_message})
+            messages.append({"role": "assistant", "content": previous_reply})
+        messages.append({"role": "user", "content": user_message})
+        return messages
+
+    async def _generate_response(self, chat_id: int, user_message: str) -> str:
         """Call the OpenAI Responses API and return plain text."""
         response = await self._client.responses.create(
             model=self._model,
-            input=[
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            input=self._build_messages(chat_id, user_message),
         )
         return extract_output_text(response)
 
@@ -69,12 +97,16 @@ class GreekTeacherAgent:
         if not update.message or not update.message.text:
             return
 
+        chat = update.effective_chat
+        if chat is None:
+            return
+
         user_message = update.message.text.strip()
         if not user_message:
             return
 
         try:
-            reply = await self._generate_response(user_message)
+            reply = await self._generate_response(chat.id, user_message)
         except Exception:
             LOGGER.exception("Failed to generate response from OpenAI.")
             reply = (
@@ -83,6 +115,7 @@ class GreekTeacherAgent:
 
         if reply:
             await update.message.reply_text(reply)
+            self._record_interaction(chat.id, user_message, reply)
 
 
 def build_openai_client(api_key: str) -> AsyncOpenAI:

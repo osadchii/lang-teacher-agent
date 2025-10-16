@@ -1,11 +1,11 @@
 # Project Description
 
 ## Mission
-Lang Teacher Agent is an AI tutor focused on helping learners practice Greek through conversational interactions. The initial milestone is an echo-style Telegram bot that will gradually evolve into a guided language learning experience.
+Lang Teacher Agent is an AI tutor focused on helping learners practice Greek through conversational interactions. The agent provides contextual answers powered by OpenAI's Responses API and retains a short history of each chat so learners can iterate on their questions.
 
 ## System Architecture
-- `src/main.py`: Boots the application, configures logging, and starts the Telegram bot.
-- Telegram Bot API: Receives messages from learners and currently echoes them back.
+- `src/main.py`: Boots the application, configures logging, starts the Telegram bot, and maintains the short-term memory of each chat.
+- Telegram Bot API: Receives messages from learners and relays them to the OpenAI-backed tutor, which responds with tailored Greek language guidance.
 - PostgreSQL (via Docker): Reserved for persisting learner progress and lesson content in future milestones.
 - GitHub Actions workflow: Runs tests and Docker builds to keep the main branch production-ready.
 
