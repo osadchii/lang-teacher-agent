@@ -1,33 +1,47 @@
 # Lang Teacher Agent
 
-Базовый каркас Python-приложения с поддержкой Docker и PostgreSQL.
+Lang Teacher Agent is an AI-powered tutor that helps learners practice the Greek language. The application currently exposes its functionality through a Telegram bot and is built with Python, Docker, and PostgreSQL.
 
-## Локальный запуск
+## Overview
+- Telegram bot that echoes user messages for now, providing the scaffolding for conversational learning flows.
+- Configurable through environment variables stored in `.env` or provided at runtime.
+- Docker Compose environment that bundles the application and PostgreSQL for local development.
+- Continuous integration workflow defined in GitHub Actions.
 
+## Prerequisites
+- Python 3.11+
+- pip (examples below use pip)
+- Docker and Docker Compose (optional, for containerized runs)
+
+## Local Setup
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\Activate.ps1
 pip install --upgrade pip
 pip install -r requirements.txt
 cp .env.example .env
-python src/main.py
 ```
 
-## Тесты
+Update `.env` (or your shell environment) with a valid `TELEGRAM_BOT_TOKEN`, then start the application:
 
+```bash
+python -m src.main
+```
+
+## Testing
 ```bash
 pytest
 ```
 
-## Docker
-
-Собрать и запустить сервисы (приложение + PostgreSQL):
-
+## Docker Usage
+Build and run the services (application + PostgreSQL) with:
 ```bash
 docker compose up --build
 ```
 
-## GitHub Actions
+## Continuous Integration
+Automated checks run in `.github/workflows/ci.yml`. The workflow installs dependencies, runs the test suite, and builds the Docker image to ensure each change keeps the project healthy.
 
-При пуше в репозиторий запускаются две задачи: проверка тестов и пробная сборка Docker-образа. Файл конфигурации находится в `.github/workflows/ci.yml`.
-
+## Additional Documentation
+- `PROJECT_DESCRIPTION.md` records the current architecture and directory structure.
+- `CODEX_RULES.md` captures collaboration rules for future Codex sessions.
