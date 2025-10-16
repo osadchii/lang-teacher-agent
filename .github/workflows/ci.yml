@@ -51,5 +51,5 @@ jobs:
           context: .
           push: false
           load: false
-          tags: ghcr.io/your-github-username/lang-teacher-agent:latest
+          tags: ghcr.io/osadchii/lang-teacher-agent:latest
           platforms: linux/amd64,linux/arm64
