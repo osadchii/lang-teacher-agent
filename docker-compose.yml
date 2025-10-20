@@ -5,6 +5,8 @@ services:
     image: ghcr.io/osadchii/lang-teacher-agent:latest
     env_file:
       - .env
+    environment:
+      POSTGRES_HOST: postgres
     depends_on:
       - postgres
     command: python -m src.main
