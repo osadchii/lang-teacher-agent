@@ -9,8 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-from db import get_session_factory, run_migrations_if_needed
-from db.users import upsert_user
+try:
+    from src.db import get_session_factory, run_migrations_if_needed
+    from src.db.users import upsert_user
+except ModuleNotFoundError as exc:
+    if exc.name not in {"src", "src.db", "src.db.users"}:
+        raise
+    from db import get_session_factory, run_migrations_if_needed
+    from db.users import upsert_user
 
 
 logging.basicConfig(
