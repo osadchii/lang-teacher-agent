@@ -1,11 +1,16 @@
+import asyncio
 import logging
 import os
 from collections import deque
-from typing import Deque, Dict, Final, List, Tuple
+from typing import Deque, Dict, Final, List, Optional, Tuple
 
 from openai import AsyncOpenAI
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, MessageHandler, filters
+
+from db import get_session_factory, run_migrations_if_needed
+from db.users import upsert_user
 
 
 logging.basicConfig(
@@ -54,6 +59,7 @@ class GreekTeacherAgent:
         client: AsyncOpenAI,
         model: str,
         system_prompt: str,
+        session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
         history_size: int = 5,
     ) -> None:
         self._client = client
@@ -61,6 +67,7 @@ class GreekTeacherAgent:
         self._system_prompt = system_prompt
         self._history_size = history_size
         self._history: Dict[int, Deque[Tuple[str, str]]] = {}
+        self._session_factory = session_factory
 
     def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
         """Return the rolling history buffer for a chat, creating it when needed."""
@@ -74,6 +81,23 @@ class GreekTeacherAgent:
         """Persist the most recent user/assistant exchange for the chat."""
         history = self._get_history(chat_id)
         history.append((user_message, assistant_reply))
+
+    async def _store_user_profile(
+        self,
+        chat_id: int,
+        first_name: Optional[str],
+        last_name: Optional[str],
+    ) -> None:
+        """Save the Telegram user's profile details into the database."""
+        if self._session_factory is None:
+            return
+
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await upsert_user(session, chat_id, first_name, last_name)
+        except Exception:
+            LOGGER.exception("Failed to upsert Telegram user record for chat %s.", chat_id)
 
     def _build_messages(self, chat_id: int, user_message: str) -> List[Dict[str, str]]:
         """Compose the conversation context to send to the OpenAI Responses API."""
@@ -104,6 +128,10 @@ class GreekTeacherAgent:
         user_message = update.message.text.strip()
         if not user_message:
             return
+
+        user = update.effective_user
+        if user is not None:
+            await self._store_user_profile(chat.id, getattr(user, "first_name", None), getattr(user, "last_name", None))
 
         try:
             reply = await self._generate_response(chat.id, user_message)
@@ -146,9 +174,21 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is required to generate answers.")
 
+    try:
+        run_migrations_if_needed()
+    except Exception:
+        LOGGER.exception("Database migrations failed. Aborting startup.")
+        raise
+
+    session_factory = get_session_factory()
     openai_client = build_openai_client(api_key)
-    agent = GreekTeacherAgent(openai_client, model_name, SYSTEM_PROMPT)
+    agent = GreekTeacherAgent(openai_client, model_name, SYSTEM_PROMPT, session_factory=session_factory)
     application = create_application(bot_token, agent)
+
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     LOGGER.info("Starting Telegram bot for %s in %s mode.", app_name, app_env)
     application.run_polling()
