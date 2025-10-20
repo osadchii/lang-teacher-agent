@@ -52,3 +52,54 @@ jobs:
           load: false
           tags: ghcr.io/osadchii/lang-teacher-agent:latest
           platforms: linux/amd64,linux/arm64
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure remote directory exists
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.RPI_HOST }}
+          port: ${{ secrets.RPI_PORT }}
+          username: ${{ secrets.RPI_USER }}
+          key: ${{ secrets.RPI_SSH_KEY }}
+          script: |
+            mkdir -p /opt/lang-teacher
+
+      - name: Copy deployment artifacts
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.RPI_HOST }}
+          port: ${{ secrets.RPI_PORT }}
+          username: ${{ secrets.RPI_USER }}
+          key: ${{ secrets.RPI_SSH_KEY }}
+          source: "docker-compose.yml,.env.example"
+          target: "/opt/lang-teacher"
+
+      - name: Apply docker compose release
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.RPI_HOST }}
+          port: ${{ secrets.RPI_PORT }}
+          username: ${{ secrets.RPI_USER }}
+          key: ${{ secrets.RPI_SSH_KEY }}
+          script: |
+            set -eu
+            cd /opt/lang-teacher
+            compose_cmd="docker compose"
+            if ! docker compose version >/dev/null 2>&1; then
+              if command -v docker-compose >/dev/null 2>&1; then
+                compose_cmd="docker-compose"
+              else
+                echo "Docker Compose is not available" >&2
+                exit 1
+              fi
+            fi
+            $compose_cmd pull || true
+            $compose_cmd up -d
