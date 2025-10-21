@@ -138,6 +138,8 @@ class FlashcardWorkflow:
             "\"target_text\" (a natural translation into {target_language}), "
             "\"example\" (a short sentence in {source_language}), and "
             "\"example_translation\" (the same sentence translated into {target_language}). "
+            "Only produce flashcards for the exact terms explicitly requested by the user. "
+            "Do not add extra grammatical variants such as plurals, cases, or other inflections unless the user clearly asks for them. "
             "When the term is a noun in {source_language}, prepend the correct definite article (such as 'ο', 'η', or 'το') to the source_text so the learner can see its grammatical gender. "
             "Always produce valid JSON without commentary, Markdown, or code fences."
         ).format(
@@ -157,6 +159,7 @@ class FlashcardWorkflow:
         self,
         chat_id: int,
         message: str,
+        context: Optional[str] = None,
     ) -> FlashcardWorkflowResult:
         """Attempt to create flashcards from a user message."""
         if self._session_factory is None:
@@ -166,7 +169,8 @@ class FlashcardWorkflow:
             return FlashcardWorkflowResult(False, [], [])
 
         try:
-            extraction = await self._extract_flashcards(message)
+            extraction_message = self._combine_message_and_context(message, context)
+            extraction = await self._extract_flashcards(extraction_message)
         except Exception:
             LOGGER.exception("Flashcard extraction failed for chat %s.", chat_id)
             return FlashcardWorkflowResult(
@@ -198,6 +202,21 @@ class FlashcardWorkflow:
             errors=extraction.errors,
             reason=extraction.reason,
         )
+
+    @staticmethod
+    def _combine_message_and_context(
+        message: str,
+        context: Optional[str],
+    ) -> str:
+        if not context:
+            return message
+
+        message_block = message.strip()
+        context_block = context.strip()
+        if not message_block:
+            return context_block
+
+        return f"{message_block}\n\nКонтекст для создания карточек:\n{context_block}"
 
     async def _extract_flashcards(self, message: str) -> FlashcardExtractionResult:
         response = await self._client.responses.create(

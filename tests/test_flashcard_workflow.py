@@ -12,9 +12,13 @@ class _StubResponses:
     def __init__(self, payload: str) -> None:
         self._payload = payload
         self.calls = 0
+        self.last_args: tuple | None = None
+        self.last_kwargs: dict | None = None
 
     async def create(self, *args, **kwargs):
         self.calls += 1
+        self.last_args = args
+        self.last_kwargs = kwargs
         return types.SimpleNamespace(output_text=self._payload)
 
 
@@ -86,3 +90,45 @@ async def test_workflow_skips_irrelevant_messages(session_factory) -> None:
 
     assert result.handled is False
     assert client.responses.calls == 0
+
+
+
+@pytest.mark.asyncio
+async def test_workflow_includes_context_for_extraction(session_factory) -> None:
+    client = _StubClient(FLASHCARD_JSON)
+    workflow = FlashcardWorkflow(
+        client=client,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    context = (
+        "Предыдущее сообщение пользователя: Как будет «больница»?\n"
+        "Ответ преподавателя: По-гречески «больница» — το νοσοκομείο (to nosokomío)."
+    )
+
+    await workflow.handle(99, "Добавь в карточки", context=context)
+
+    assert client.responses.calls == 1
+    assert client.responses.last_kwargs is not None
+    user_prompt = client.responses.last_kwargs["input"][1]["content"]
+    assert "Добавь в карточки" in user_prompt
+    assert "Контекст для создания карточек" in user_prompt
+    assert "το νοσοκομείο" in user_prompt
+
+
+def test_system_prompt_discourages_extra_variants(session_factory) -> None:
+    client = _StubClient(FLASHCARD_JSON)
+    workflow = FlashcardWorkflow(
+        client=client,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    prompt = workflow._system_prompt
+    assert "Only produce flashcards for the exact terms explicitly requested" in prompt
+    assert "Do not add extra grammatical variants" in prompt
