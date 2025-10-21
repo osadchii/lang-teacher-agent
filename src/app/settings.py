@@ -30,6 +30,10 @@ class AppSettings:
     openai_api_key: str
     openai_model: str
     history_size: int
+    flashcard_model: str
+    flashcard_source_language: str
+    flashcard_target_language: str
+    flashcard_max_cards: int
 
     @classmethod
     def from_env(cls) -> AppSettings:
@@ -57,6 +61,17 @@ class AppSettings:
         if history_size < 1:
             raise RuntimeError("TEACHER_HISTORY_SIZE must be a positive integer.")
 
+        flashcard_model = os.getenv("FLASHCARD_MODEL", openai_model)
+        flashcard_source_language = os.getenv("FLASHCARD_SOURCE_LANGUAGE", "Greek")
+        flashcard_target_language = os.getenv("FLASHCARD_TARGET_LANGUAGE", "Russian")
+
+        try:
+            flashcard_max_cards = int(os.getenv("FLASHCARD_MAX_CARDS", "5"))
+        except ValueError as exc:  # pragma: no cover - defensive parsing
+            raise RuntimeError("FLASHCARD_MAX_CARDS must be an integer.") from exc
+        if flashcard_max_cards < 1 or flashcard_max_cards > 10:
+            raise RuntimeError("FLASHCARD_MAX_CARDS must be between 1 and 10.")
+
         return cls(
             app_name=app_name,
             app_env=app_env,
@@ -65,4 +80,8 @@ class AppSettings:
             openai_api_key=openai_api_key,
             openai_model=openai_model,
             history_size=history_size,
+            flashcard_model=flashcard_model,
+            flashcard_source_language=flashcard_source_language,
+            flashcard_target_language=flashcard_target_language,
+            flashcard_max_cards=flashcard_max_cards,
         )

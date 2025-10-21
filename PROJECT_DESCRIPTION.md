@@ -6,21 +6,22 @@ Lang Teacher Agent is an AI tutor focused on helping learners practice Greek thr
 ## System Architecture
 - `src/main.py`: Thin entry point that loads environment-backed settings and delegates to the runtime bootstrap.
 - `src/app/`: Separates environment configuration (`settings.py`) from runtime wiring (`runtime.py`), including logging setup and migration execution.
-- `src/bot/`: Contains the `GreekTeacherAgent` Telegram handler and the Telegram application factory.
+- `src/bot/`: Contains the `GreekTeacherAgent` Telegram handler, flashcard extraction workflow (`flashcard_workflow.py`), spaced-repetition scheduling helpers (`srs.py`), and the Telegram application factory.
 - `src/services/`: Wraps external integrations, currently limited to the OpenAI client builder.
-- `src/db/`: Houses SQLAlchemy models, session management, and helpers for running migrations during startup.
+- `src/db/`: Houses SQLAlchemy models, flashcard persistence helpers, session management, and helpers for running migrations during startup.
 - Telegram Bot API: Receives messages from learners and relays them to the OpenAI-backed tutor, which responds with tailored Greek language guidance.
+- Flashcard flow: User intent is detected in free-form messages, OpenAI synthesises translations/examples, and cards are stored in shared (`flashcards`) and user-specific (`user_flashcards`, `flashcard_reviews`) tables. Inline Telegram buttons present "Взять карточку" to surface a partially hidden card, "Показать полностью" to reveal the rest, and 1-5 rating buttons that feed the SM-2 scheduler.
 - Alembic migrations: Applied automatically when the application boots so the database schema stays up to date.
-- PostgreSQL (via Docker): Stores Telegram user records with their identifiers, names, and first-contact timestamps.
+- PostgreSQL (via Docker): Stores Telegram user records alongside shared flashcards, per-user scheduling metadata, and review history.
 - GitHub Actions workflow: Runs tests and Docker builds to keep the main branch production-ready.
 
 ## Directory Structure
 - `src/`: Application source code organised into focused packages.
 - `src/app/`: Configuration loading and runtime orchestration.
-- `src/bot/`: Telegram-facing agent logic and application wiring.
-- `src/db/`: Database models, session factory, and migration utilities.
+- `src/bot/`: Telegram-facing agent logic, flashcard workflow, and application wiring.
+- `src/db/`: Database models, session factory, flashcard helpers, and migration utilities.
 - `src/services/`: External service helpers (OpenAI client).
-- `tests/`: Pytest-based test suite (placeholder for future test coverage).
+- `tests/`: Pytest-based async test suite covering conversation memory, flashcard storage, workflow parsing, and SRS scheduling.
 - `migrations/`: Alembic migration scripts tracked by `alembic.ini`.
 - `.github/workflows/`: Continuous integration workflows.
 - `docker-compose.yml`: Local development stack wiring the app and PostgreSQL.
