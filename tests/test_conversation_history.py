@@ -57,3 +57,20 @@ def test_histories_are_isolated_by_chat_id() -> None:
         "assistant second"
     }
 
+
+def test_flashcard_context_uses_last_exchange() -> None:
+    agent = _build_agent()
+    chat_id = 303
+
+    agent._record_interaction(
+        chat_id,
+        "Как будет «больница»?",
+        "По-гречески «больница» — το νοσοκομείο (to nosokomío).",
+    )
+
+    context = agent._build_flashcard_context(chat_id)
+
+    assert context is not None
+    assert "Как будет «больница»?" in context
+    assert "το νοσοκομείο" in context
+

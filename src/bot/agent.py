@@ -170,6 +170,23 @@ class GreekTeacherAgent:
             )
             self._record_interaction(chat.id, user_message, reply)
 
+    def _build_flashcard_context(self, chat_id: int) -> Optional[str]:
+        """Return the most recent exchange to help flashcard extraction."""
+        history = self._get_history(chat_id)
+        if not history:
+            return None
+
+        previous_user, previous_reply = history[-1]
+        lines: List[str] = []
+        if previous_user:
+            lines.append(f"Предыдущее сообщение пользователя: {previous_user.strip()}")
+        if previous_reply:
+            lines.append(f"Ответ преподавателя: {previous_reply.strip()}")
+        if not lines:
+            return None
+        lines.append("Добавь подходящую лексику из этого ответа в карточки ученика.")
+        return "\n".join(lines)
+
     async def _maybe_handle_flashcard_request(
         self,
         update: Update,
@@ -182,7 +199,12 @@ class GreekTeacherAgent:
         if self._flashcard_workflow is None:
             return None
 
-        result = await self._flashcard_workflow.handle(chat_id, user_message)
+        context_payload = self._build_flashcard_context(chat_id)
+        result = await self._flashcard_workflow.handle(
+            chat_id,
+            user_message,
+            context=context_payload,
+        )
         if not result.summaries and not result.errors:
             return result
 
