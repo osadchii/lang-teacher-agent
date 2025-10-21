@@ -138,6 +138,7 @@ class FlashcardWorkflow:
             "\"target_text\" (a natural translation into {target_language}), "
             "\"example\" (a short sentence in {source_language}), and "
             "\"example_translation\" (the same sentence translated into {target_language}). "
+            "When the term is a noun in {source_language}, prepend the correct definite article (such as 'ο', 'η', or 'το') to the source_text so the learner can see its grammatical gender. "
             "Always produce valid JSON without commentary, Markdown, or code fences."
         ).format(
             source_language=self._source_language,

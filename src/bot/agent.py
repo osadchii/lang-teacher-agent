@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from html import escape
 from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -49,6 +50,8 @@ class GreekTeacherAgent:
         self._history_size = history_size
         self._history: Dict[int, Deque[Tuple[str, str]]] = {}
         self._session_factory = session_factory
+        self._flashcard_source_language = flashcard_source_language
+        self._flashcard_target_language = flashcard_target_language
         self._flashcard_workflow: Optional[FlashcardWorkflow]
         if session_factory is None:
             self._flashcard_workflow = None
@@ -141,7 +144,9 @@ class GreekTeacherAgent:
                 getattr(user, "last_name", None),
             )
 
-        await self._maybe_handle_flashcard_request(update, chat.id, user_message)
+        flashcard_result = await self._maybe_handle_flashcard_request(update, chat.id, user_message)
+        if flashcard_result and flashcard_result.handled:
+            return
 
         try:
             typing_task = asyncio.create_task(self._typing_indicator(chat.id, context))
@@ -278,6 +283,7 @@ class GreekTeacherAgent:
         prompt = self._format_flashcard_question(flashcard_record, orientation)
         await message.reply_text(
             prompt,
+            parse_mode=ParseMode.HTML,
             reply_markup=self._build_reveal_keyboard(flashcard_record.id, orientation),
         )
 
@@ -333,6 +339,7 @@ class GreekTeacherAgent:
         try:
             await query.edit_message_text(
                 prompt,
+                parse_mode=ParseMode.HTML,
                 reply_markup=self._build_rating_keyboard(user_flashcard.id),
             )
         except Exception:  # pragma: no cover - best effort update
@@ -341,6 +348,7 @@ class GreekTeacherAgent:
                 await query.edit_message_reply_markup(reply_markup=None)
             await message.reply_text(
                 prompt,
+                parse_mode=ParseMode.HTML,
                 reply_markup=self._build_rating_keyboard(user_flashcard.id),
             )
 
@@ -427,60 +435,77 @@ class GreekTeacherAgent:
         )
 
     @staticmethod
+    def _escape_html(text: Optional[str]) -> str:
+        if not text:
+            return ''
+        return escape(text, quote=False)
+
     def _format_flashcard_question(
+        self,
         record: UserFlashcard,
         orientation: str,
     ) -> str:
         flashcard = record.flashcard
         if flashcard is None:
-            return "Не удалось найти карточку."
+            return 'Карточку не удалось загрузить.'
 
-        if orientation == "target_to_source":
-            header = "Вспомни, какое слово соответствует этому переводу:"
-            label, value = "Перевод", flashcard.target_text
-        else:
-            header = "Вспомни перевод этого слова:"
-            label, value = "Слово", flashcard.source_text
+        source_label = 'Исходная фраза'
+        target_label = 'Перевод'
+        direction = f"{self._flashcard_source_language} → {self._flashcard_target_language}"
+        task_language = self._flashcard_target_language
+        visible_label = source_label
+        visible_value = self._escape_html(flashcard.source_text)
+
+        if orientation == 'target_to_source':
+            direction = f"{self._flashcard_target_language} → {self._flashcard_source_language}"
+            task_language = self._flashcard_source_language
+            visible_label = target_label
+            visible_value = self._escape_html(flashcard.target_text)
 
         lines = [
-            "Тренировка",
-            header,
-            f"{label}: {value}",
-            "",
-            "Нажми «Показать полностью», когда будешь готов проверить ответ.",
+            '<b>Новая карточка</b>',
+            f"<i>Направление:</i> {self._escape_html(direction)}",
+            '',
+            f"<b>Задание:</b> Переведи на {self._escape_html(task_language)}.",
+            f"<b>{self._escape_html(visible_label)}:</b> {visible_value}",
+            '',
+            '<i>Нажми «Показать ответ», когда будешь готов.</i>',
         ]
         return "\n".join(lines).strip()
 
-    @staticmethod
     def _format_flashcard_prompt(
+        self,
         record: UserFlashcard,
         orientation: str,
     ) -> str:
         flashcard = record.flashcard
         if flashcard is None:
-            return "Не удалось загрузить карточку."
+            return 'Карточку не удалось показать.'
 
-        if orientation == "target_to_source":
-            first_label, first_value = "Перевод", flashcard.target_text
-            second_label, second_value = "Слово", flashcard.source_text
-            header = "Вспомни исходное слово:"
-        else:
-            first_label, first_value = "Слово", flashcard.source_text
-            second_label, second_value = "Перевод", flashcard.target_text
-            header = "Вспомни перевод:"
+        source_label = 'Исходная фраза'
+        target_label = 'Перевод'
+        prompt_label = target_label
+        prompt_value = self._escape_html(flashcard.target_text)
+        answer_label = source_label
+        answer_value = self._escape_html(flashcard.source_text)
+
+        if orientation == 'source_to_target':
+            prompt_label = source_label
+            prompt_value = self._escape_html(flashcard.source_text)
+            answer_label = target_label
+            answer_value = self._escape_html(flashcard.target_text)
 
         lines = [
-            "🃏 Карточка",
-            header,
-            f"{first_label}: {first_value}",
-            f"{second_label}: {second_value}",
+            '<b>Ответ по карточке</b>',
+            f"<b>{self._escape_html(prompt_label)}:</b> {prompt_value}",
+            f"<b>{self._escape_html(answer_label)}:</b> {answer_value}",
         ]
 
         if flashcard.example:
-            lines.append(f"Пример: {flashcard.example}")
+            lines.append(f"<i>Пример:</i> {self._escape_html(flashcard.example)}")
 
-        lines.append("")
-        lines.append("Как хорошо ты помнишь это слово? Выбери оценку:")
+        lines.append('')
+        lines.append('<i>Оцени карточку, чтобы продолжить.</i>')
         return "\n".join(lines).strip()
 
     @staticmethod
