@@ -6,6 +6,7 @@ Lang Teacher Agent is an AI-powered tutor that helps learners practise the Greek
 - Telegram bot that connects to OpenAI's Responses API to deliver explanations, translations, and pronunciation guidance.
 - Remembers the last five user messages and assistant replies per chat so learners can ask follow-up questions without repeating context (configurable through `TEACHER_HISTORY_SIZE`).
 - Persists Telegram user identifiers and profile details in PostgreSQL, capturing the first time a learner contacts the bot.
+- Supports spaced-repetition flashcards: the bot recognises requests to add vocabulary, generates translations/examples through OpenAI, stores shared flashcards, and lets learners review them via inline buttons with 1–5 self-assessment scores.
 - Configurable through environment variables stored in `.env` or provided at runtime.
 - Docker Compose environment that bundles the application and PostgreSQL for local development.
 - Continuous integration workflow defined in GitHub Actions.
@@ -25,7 +26,12 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Update `.env` (or your shell environment) with valid `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, and database settings (`DATABASE_URL`, `POSTGRES_*`). The flag `RUN_MIGRATIONS_ON_STARTUP` controls whether migrations are applied automatically when the process boots (defaults to `true`). The short-term memory buffer size can be tuned with `TEACHER_HISTORY_SIZE`.
+Update `.env` (or your shell environment) with valid `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, and database settings (`DATABASE_URL`, `POSTGRES_*`). The flag `RUN_MIGRATIONS_ON_STARTUP` controls whether migrations are applied automatically when the process boots (defaults to `true`). The short-term memory buffer size can be tuned with `TEACHER_HISTORY_SIZE`. Flashcard generation can be customised with:
+
+- `FLASHCARD_MODEL` – model used for translation/example synthesis (defaults to `OPENAI_MODEL`)
+- `FLASHCARD_SOURCE_LANGUAGE` – language of the terms added to cards (default `Greek`)
+- `FLASHCARD_TARGET_LANGUAGE` – translation language shown on cards (default `Russian`)
+- `FLASHCARD_MAX_CARDS` – maximum number of cards created from one request (default `5`)
 
 Start the application:
 
@@ -37,6 +43,12 @@ python -m src.main
 - Alembic migrations live in the `migrations/` directory and are configured via `alembic.ini`.
 - On startup the bot calls `alembic upgrade head` (through `src.db.run_migrations_if_needed`) so the schema is always up to date.
 - To create a new migration, run `alembic revision --autogenerate -m "describe change"` with the virtual environment activated, review the generated script, and commit it alongside the relevant model changes.
+- Flashcards are stored in three tables: shared card definitions (`flashcards`), user-specific scheduling metadata (`user_flashcards`), and review history (`flashcard_reviews`).
+
+## Flashcards
+- Ask the bot to save vocabulary in free-form text (e.g. “Добавь слово λόγος в карточки”). The bot calls OpenAI to generate translations and example sentences and confirms the new cards.
+- Every outgoing bot message includes the “Взять карточку” button. Press it to receive the next due card; the bot randomly decides whether to show the term or the translation first.
+- After reviewing, choose a 1–5 score. The scheduling algorithm (simplified SM-2) adjusts how soon the card will return: higher scores push the card further into the future, while low scores reschedule it sooner.
 
 ## Testing
 ```bash
