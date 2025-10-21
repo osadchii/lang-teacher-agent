@@ -9,6 +9,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from src.db.users import upsert_user
@@ -137,5 +138,5 @@ class GreekTeacherAgent:
             )
 
         if reply:
-            await update.message.reply_text(reply)
+            await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
             self._record_interaction(chat.id, user_message, reply)
