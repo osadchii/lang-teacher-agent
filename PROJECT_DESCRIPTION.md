@@ -10,7 +10,7 @@ Lang Teacher Agent is an AI tutor focused on helping learners practice Greek thr
 - `src/services/`: Wraps external integrations, currently limited to the OpenAI client builder.
 - `src/db/`: Houses SQLAlchemy models, flashcard persistence helpers, session management, and helpers for running migrations during startup.
 - Telegram Bot API: Receives messages from learners and relays them to the OpenAI-backed tutor, which responds with tailored Greek language guidance.
-- Flashcard flow: User intent is detected in free-form messages, OpenAI synthesises translations/examples, and cards are stored in shared (`flashcards`) and user-specific (`user_flashcards`, `flashcard_reviews`) tables. Inline Telegram buttons deliver reviews with 1–5 scores that feed the SM-2 scheduler.
+- Flashcard flow: User intent is detected in free-form messages, OpenAI synthesises translations/examples, and cards are stored in shared (`flashcards`) and user-specific (`user_flashcards`, `flashcard_reviews`) tables. Inline Telegram buttons present "Взять карточку" to surface a partially hidden card, "Показать полностью" to reveal the rest, and 1-5 rating buttons that feed the SM-2 scheduler.
 - Alembic migrations: Applied automatically when the application boots so the database schema stays up to date.
 - PostgreSQL (via Docker): Stores Telegram user records alongside shared flashcards, per-user scheduling metadata, and review history.
 - GitHub Actions workflow: Runs tests and Docker builds to keep the main branch production-ready.

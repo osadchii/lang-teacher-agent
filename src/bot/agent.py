@@ -223,6 +223,19 @@ class GreekTeacherAgent:
             [[InlineKeyboardButton("Взять карточку", callback_data="fc_take")]]
         )
 
+    @staticmethod
+    def _build_reveal_keyboard(user_flashcard_id: int, orientation: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Показать полностью",
+                        callback_data=f"fc_show:{user_flashcard_id}:{orientation}",
+                    )
+                ]
+            ]
+        )
+
     def _build_rating_keyboard(self, user_flashcard_id: int) -> InlineKeyboardMarkup:
         buttons = [
             InlineKeyboardButton(str(score), callback_data=f"fc_rate:{user_flashcard_id}:{score}")
@@ -262,11 +275,76 @@ class GreekTeacherAgent:
             return
 
         orientation = random.choice(("source_to_target", "target_to_source"))
-        prompt = self._format_flashcard_prompt(flashcard_record, orientation)
+        prompt = self._format_flashcard_question(flashcard_record, orientation)
         await message.reply_text(
             prompt,
-            reply_markup=self._build_rating_keyboard(flashcard_record.id),
+            reply_markup=self._build_reveal_keyboard(flashcard_record.id, orientation),
         )
+
+    async def handle_show_flashcard(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+
+        if self._session_factory is None:
+            await query.answer("Карточки временно недоступны.", show_alert=True)
+            return
+
+        parts = query.data.split(":")
+        if len(parts) != 3 or parts[0] != "fc_show":
+            await query.answer()
+            return
+
+        try:
+            user_flashcard_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный запрос.", show_alert=True)
+            return
+
+        orientation = parts[2]
+        if orientation not in {"source_to_target", "target_to_source"}:
+            await query.answer("Не удалось определить направление карточки.", show_alert=True)
+            return
+
+        message = query.message
+        if message is None or message.chat is None:
+            await query.answer()
+            return
+
+        chat_id = message.chat.id
+
+        async with self._session_factory() as session:
+            user_flashcard = await session.get(
+                UserFlashcard,
+                user_flashcard_id,
+                options=[selectinload(UserFlashcard.flashcard)],
+            )
+
+        if user_flashcard is None or user_flashcard.chat_id != chat_id:
+            await query.answer("Карточка не найдена.", show_alert=True)
+            return
+
+        prompt = self._format_flashcard_prompt(user_flashcard, orientation)
+
+        try:
+            await query.edit_message_text(
+                prompt,
+                reply_markup=self._build_rating_keyboard(user_flashcard.id),
+            )
+        except Exception:  # pragma: no cover - best effort update
+            LOGGER.debug("Could not reveal flashcard text.", exc_info=True)
+            with suppress(Exception):
+                await query.edit_message_reply_markup(reply_markup=None)
+            await message.reply_text(
+                prompt,
+                reply_markup=self._build_rating_keyboard(user_flashcard.id),
+            )
+
+        await query.answer()
 
     async def handle_rate_flashcard(
         self,
@@ -347,6 +425,31 @@ class GreekTeacherAgent:
             f"Оценка {score} сохранена. Вернёмся к карточке {self._describe_interval(schedule.interval)}.",
             reply_markup=self._build_take_card_markup(),
         )
+
+    @staticmethod
+    def _format_flashcard_question(
+        record: UserFlashcard,
+        orientation: str,
+    ) -> str:
+        flashcard = record.flashcard
+        if flashcard is None:
+            return "Не удалось найти карточку."
+
+        if orientation == "target_to_source":
+            header = "Вспомни, какое слово соответствует этому переводу:"
+            label, value = "Перевод", flashcard.target_text
+        else:
+            header = "Вспомни перевод этого слова:"
+            label, value = "Слово", flashcard.source_text
+
+        lines = [
+            "Тренировка",
+            header,
+            f"{label}: {value}",
+            "",
+            "Нажми «Показать полностью», когда будешь готов проверить ответ.",
+        ]
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _format_flashcard_prompt(

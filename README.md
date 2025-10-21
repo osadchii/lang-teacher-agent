@@ -47,8 +47,9 @@ python -m src.main
 
 ## Flashcards
 - Ask the bot to save vocabulary in free-form text (e.g. “Добавь слово λόγος в карточки”). The bot calls OpenAI to generate translations and example sentences and confirms the new cards.
-- Every outgoing bot message includes the “Взять карточку” button. Press it to receive the next due card; the bot randomly decides whether to show the term or the translation first.
-- After reviewing, choose a 1–5 score. The scheduling algorithm (simplified SM-2) adjusts how soon the card will return: higher scores push the card further into the future, while low scores reschedule it sooner.
+- Every outgoing bot message includes the "Взять карточку" button. Press it to receive the next due card; the bot randomly decides whether to surface the term or its translation first and hides the remainder of the card.
+- When you're ready to check yourself, tap "Показать полностью" to reveal the missing side along with the example sentence.
+- After revealing the answer, choose a 1-5 score. The scheduling algorithm (simplified SM-2) adjusts how soon the card will return: higher scores push the card further into the future, while low scores reschedule it sooner.
 
 ## Testing
 ```bash
