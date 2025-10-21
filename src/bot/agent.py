@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from collections import deque
+from contextlib import suppress
 from typing import Deque, Dict, List, Optional, Tuple
 
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
 from src.db.users import upsert_user
@@ -108,6 +110,17 @@ class GreekTeacherAgent:
         )
         return extract_output_text(response)
 
+    async def _typing_indicator(
+        self, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Continuously send a typing action so users see the bot working."""
+        try:
+            while True:
+                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            return
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Process an incoming Telegram message and reply with the AI-generated answer."""
         if not update.message or not update.message.text:
@@ -130,12 +143,18 @@ class GreekTeacherAgent:
             )
 
         try:
+            typing_task = asyncio.create_task(self._typing_indicator(chat.id, context))
             reply = await self._generate_response(chat.id, user_message)
         except Exception:  # pragma: no cover - network or API issues handled gracefully
             LOGGER.exception("Failed to generate response from OpenAI.")
             reply = (
                 "Failed to reach the Greek tutor right now. Please try your request again in a moment."
             )
+        finally:
+            if "typing_task" in locals():
+                typing_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await typing_task
 
         if reply:
             await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
