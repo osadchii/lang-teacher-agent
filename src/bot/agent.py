@@ -256,7 +256,7 @@ class GreekTeacherAgent:
             [
                 [
                     InlineKeyboardButton(
-                        "Показать полностью",
+                        "Показать ответ",
                         callback_data=f"fc_show:{user_flashcard_id}:{orientation}",
                     )
                 ]
