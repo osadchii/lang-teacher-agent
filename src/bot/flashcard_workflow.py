@@ -16,6 +16,7 @@ from src.db.flashcards import (
     FlashcardPayload,
     ensure_user_flashcard,
     get_or_create_flashcard,
+    get_user_flashcard_by_source_text,
 )
 
 
@@ -300,6 +301,21 @@ class FlashcardWorkflow:
     ) -> Optional[FlashcardSummary]:
         now = datetime.now(timezone.utc)
         payload = card.to_payload(self._source_language, self._target_language)
+
+        # Check if user already has a card with this Greek word
+        existing_user_card = await get_user_flashcard_by_source_text(
+            session, chat_id, payload.source_text, payload.source_lang
+        )
+        if existing_user_card:
+            # User already has this Greek word - return existing card info
+            return FlashcardSummary(
+                source_text=existing_user_card.flashcard.source_text,
+                target_text=existing_user_card.flashcard.target_text,
+                example=existing_user_card.flashcard.example,
+                status="existing",
+            )
+
+        # User doesn't have this word yet - proceed with normal flow
         flashcard, _ = await get_or_create_flashcard(session, payload)
         user_flashcard, created_user_link, reactivated = await ensure_user_flashcard(
             session, chat_id, flashcard, now=now

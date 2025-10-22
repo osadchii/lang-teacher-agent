@@ -9,6 +9,7 @@ from src.db.flashcards import (
     ensure_user_flashcard,
     get_next_flashcard_for_user,
     get_or_create_flashcard,
+    get_user_flashcard_by_source_text,
 )
 
 
@@ -82,3 +83,93 @@ async def test_get_next_flashcard_for_user_prefers_due(session_factory) -> None:
         result_future = await get_next_flashcard_for_user(session, chat_id, now=now)
         assert result_future is not None
         assert result_future.flashcard.source_text == "θάλασσα"
+
+
+@pytest.mark.asyncio
+async def test_get_user_flashcard_by_source_text_finds_existing(session_factory) -> None:
+    payload = FlashcardPayload(
+        source_text="καλημέρα",
+        target_text="доброе утро",
+        source_lang="Greek",
+        target_lang="Russian",
+    )
+    chat_id = 303
+    now = datetime.now(timezone.utc)
+
+    async with session_factory() as session:
+        async with session.begin():
+            flashcard, _ = await get_or_create_flashcard(session, payload)
+            await ensure_user_flashcard(session, chat_id, flashcard, now=now)
+
+        async with session.begin():
+            found = await get_user_flashcard_by_source_text(
+                session, chat_id, "καλημέρα", "Greek"
+            )
+
+    assert found is not None
+    assert found.flashcard.source_text == "καλημέρα"
+    assert found.flashcard.target_text == "доброе утро"
+    assert found.chat_id == chat_id
+
+
+@pytest.mark.asyncio
+async def test_get_user_flashcard_by_source_text_returns_none_for_different_user(
+    session_factory,
+) -> None:
+    payload = FlashcardPayload(
+        source_text="ευχαριστώ",
+        target_text="спасибо",
+        source_lang="Greek",
+        target_lang="Russian",
+    )
+    chat_id_one = 404
+    chat_id_two = 405
+    now = datetime.now(timezone.utc)
+
+    async with session_factory() as session:
+        async with session.begin():
+            flashcard, _ = await get_or_create_flashcard(session, payload)
+            await ensure_user_flashcard(session, chat_id_one, flashcard, now=now)
+
+        async with session.begin():
+            found_for_user_one = await get_user_flashcard_by_source_text(
+                session, chat_id_one, "ευχαριστώ", "Greek"
+            )
+            found_for_user_two = await get_user_flashcard_by_source_text(
+                session, chat_id_two, "ευχαριστώ", "Greek"
+            )
+
+    assert found_for_user_one is not None
+    assert found_for_user_one.chat_id == chat_id_one
+    assert found_for_user_two is None
+
+
+@pytest.mark.asyncio
+async def test_get_user_flashcard_by_source_text_ignores_translation(
+    session_factory,
+) -> None:
+    """Test that same Greek word with different translation is still detected."""
+    payload_first = FlashcardPayload(
+        source_text="φίλος",
+        target_text="друг",
+        source_lang="Greek",
+        target_lang="Russian",
+    )
+    chat_id = 506
+
+    async with session_factory() as session:
+        async with session.begin():
+            flashcard, _ = await get_or_create_flashcard(session, payload_first)
+            await ensure_user_flashcard(
+                session, chat_id, flashcard, now=datetime.now(timezone.utc)
+            )
+
+        async with session.begin():
+            # Try to find with same source but different target shouldn't matter
+            found = await get_user_flashcard_by_source_text(
+                session, chat_id, "φίλος", "Greek"
+            )
+
+    assert found is not None
+    assert found.flashcard.source_text == "φίλος"
+    assert found.flashcard.target_text == "друг"  # Original translation
