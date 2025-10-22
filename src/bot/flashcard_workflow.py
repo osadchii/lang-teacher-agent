@@ -92,6 +92,7 @@ class FlashcardSummary:
     target_text: str
     example: Optional[str]
     status: str  # "created", "reactivated", "existing"
+    user_flashcard_id: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -317,6 +318,7 @@ class FlashcardWorkflow:
                 target_text=existing_user_card.flashcard.target_text,
                 example=existing_user_card.flashcard.example,
                 status="existing",
+                user_flashcard_id=existing_user_card.id,
             )
 
         # User doesn't have this word yet - proceed with normal flow
@@ -340,4 +342,5 @@ class FlashcardWorkflow:
             target_text=payload.target_text,
             example=payload.example,
             status=status,
+            user_flashcard_id=user_flashcard.id,
         )

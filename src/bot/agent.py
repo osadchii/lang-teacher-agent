@@ -18,7 +18,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
-from src.bot.flashcard_workflow import FlashcardWorkflow, FlashcardWorkflowResult
+from src.bot.flashcard_workflow import (
+    FlashcardSummary,
+    FlashcardWorkflow,
+    FlashcardWorkflowResult,
+)
 from src.bot.openai_utils import extract_output_text
 from src.bot.srs import calculate_next_schedule
 from src.db import UserFlashcard
@@ -255,49 +259,156 @@ class GreekTeacherAgent:
                     LOGGER.debug("Could not update flashcard progress message.", exc_info=True)
             return result
 
-        acknowledgement = self._format_flashcard_acknowledgement(result)
-        if acknowledgement:
-            markup = self._build_take_card_markup()
-            if progress_message is not None:
+        new_cards = [
+            summary for summary in result.summaries if summary.status in {"created", "reactivated"}
+        ]
+        existing_cards = [
+            summary for summary in result.summaries if summary.status not in {"created", "reactivated"}
+        ]
+
+        progress_consumed = False
+
+        async def deliver_response(
+            text: Optional[str],
+            *,
+            parse_mode: Optional[str] = None,
+            markup: Optional[InlineKeyboardMarkup] = None,
+        ) -> bool:
+            nonlocal progress_message, progress_consumed
+            if not text:
+                return False
+
+            if progress_message is not None and not progress_consumed:
                 try:
-                    await progress_message.edit_text(acknowledgement, reply_markup=markup)
+                    await progress_message.edit_text(
+                        text,
+                        parse_mode=parse_mode,
+                        reply_markup=markup,
+                    )
+                    progress_consumed = True
+                    return True
                 except Exception:  # pragma: no cover - best effort status update
                     LOGGER.debug("Could not edit flashcard progress message.", exc_info=True)
                     with suppress(Exception):
                         await progress_message.delete()
-                    await update.message.reply_text(
-                        acknowledgement,
-                        reply_markup=markup,
-                    )
-            return result
+                    progress_message = None
+
+            await update.message.reply_text(
+                text,
+                parse_mode=parse_mode,
+                reply_markup=markup,
+            )
+            return True
+
+        if new_cards:
+            for summary in new_cards:
+                await deliver_response(
+                    self._format_flashcard_added_message(summary),
+                    parse_mode=ParseMode.HTML,
+                    markup=self._build_flashcard_added_markup(summary.user_flashcard_id),
+                )
+
+            await update.message.reply_text(
+                "Когда будешь готов потренироваться, нажми «Взять карточку».",
+                reply_markup=self._build_take_card_markup(),
+            )
+
+        if existing_cards:
+            await deliver_response(
+                self._format_existing_flashcards(existing_cards),
+                parse_mode=ParseMode.HTML,
+            )
+
+        if result.errors:
+            await deliver_response(
+                self._format_flashcard_errors(result.errors, result.reason),
+                parse_mode=ParseMode.HTML,
+            )
+
+        if not progress_consumed and progress_message is not None:
+            with suppress(Exception):
+                await progress_message.delete()
 
         return result
 
-    @staticmethod
-    def _format_flashcard_acknowledgement(result: FlashcardWorkflowResult) -> str:
+    def _format_flashcard_added_message(self, summary: FlashcardSummary) -> str:
+        if summary.status == "reactivated":
+            title = "Карточка снова активна"
+        else:
+            title = "Карточка добавлена"
+
+        lines = [
+            f"<b>{self._escape_html(title)}</b>",
+            f"<b>{self._escape_html(self._flashcard_source_language)}:</b> {self._escape_html(summary.source_text)}",
+            f"<b>{self._escape_html(self._flashcard_target_language)}:</b> {self._escape_html(summary.target_text)}",
+        ]
+
+        if summary.example:
+            lines.append(f"<i>Пример:</i> {self._escape_html(summary.example)}")
+
+        lines.append("")
+        lines.append("Если хочешь отменить добавление, нажми кнопку ниже.")
+        return "\n".join(lines).strip()
+
+    def _build_flashcard_added_markup(
+        self,
+        user_flashcard_id: Optional[int],
+    ) -> Optional[InlineKeyboardMarkup]:
+        if user_flashcard_id is None:
+            return None
+
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Удалить карточку",
+                        callback_data=f"fc_delete:{user_flashcard_id}",
+                    )
+                ]
+            ]
+        )
+
+    def _format_existing_flashcards(self, summaries: List[FlashcardSummary]) -> str:
+        if not summaries:
+            return ""
+
+        lines = ["<b>Эти карточки уже есть у тебя:</b>"]
+        for summary in summaries:
+            lines.append(
+                f"- {self._escape_html(summary.source_text)} &mdash; {self._escape_html(summary.target_text)}"
+            )
+        return "\n".join(lines).strip()
+
+    def _format_flashcard_errors(
+        self,
+        errors: List[str],
+        reason: Optional[str],
+    ) -> str:
         lines: List[str] = []
 
-        if result.summaries:
-            lines.append("Карточки готовы:")
-            status_suffix = {
-                "created": "",
-                "reactivated": " (вернул в расписание)",
-                "existing": " (уже была)",
-            }
-            for summary in result.summaries:
-                suffix = status_suffix.get(summary.status, "")
-                lines.append(f"- {summary.source_text} — {summary.target_text}{suffix}")
-                if summary.example:
-                    lines.append(f"  Пример: {summary.example}")
-            lines.append("Нажми «Взять карточку», когда захочешь потренироваться.")
+        if reason:
+            lines.append(self._escape_html(reason))
 
-        if result.errors:
-            if lines:
-                lines.append("")
-            lines.append("Не удалось обработать часть запроса:")
-            for error in result.errors:
-                lines.append(f"- {error}")
+        if errors:
+            lines.append("<b>Не получилось обработать карточки:</b>")
+            for error in errors:
+                lines.append(f"- {self._escape_html(error)}")
 
+        return "\n".join(lines).strip()
+
+    def _format_flashcard_deleted_message(
+        self,
+        source_text: str,
+        target_text: str,
+    ) -> str:
+        lines = [
+            "<b>Карточка удалена</b>",
+            f"<b>{self._escape_html(self._flashcard_source_language)}:</b> {self._escape_html(source_text)}",
+            f"<b>{self._escape_html(self._flashcard_target_language)}:</b> {self._escape_html(target_text)}",
+        ]
+
+        lines.append("")
+        lines.append("Эта карточка больше не будет предлагаться.")
         return "\n".join(lines).strip()
 
     @staticmethod
@@ -325,6 +436,80 @@ class GreekTeacherAgent:
             for score in range(1, 6)
         ]
         return InlineKeyboardMarkup([buttons])
+
+    async def handle_delete_flashcard(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+
+        if self._session_factory is None:
+            await query.answer("Функция недоступна.", show_alert=True)
+            return
+
+        parts = query.data.split(":")
+        if len(parts) != 2 or parts[0] != "fc_delete":
+            await query.answer()
+            return
+
+        try:
+            user_flashcard_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+
+        message = query.message
+        if message is None or message.chat is None:
+            await query.answer()
+            return
+
+        chat_id = message.chat.id
+
+        source_text = ""
+        target_text = ""
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                user_flashcard = await session.get(
+                    UserFlashcard,
+                    user_flashcard_id,
+                    options=[selectinload(UserFlashcard.flashcard)],
+                )
+
+                if user_flashcard is None or user_flashcard.chat_id != chat_id:
+                    await query.answer("Карточка не найдена.", show_alert=True)
+                    return
+
+                flashcard = user_flashcard.flashcard
+                if flashcard is None:
+                    await query.answer("Карточка не найдена.", show_alert=True)
+                    return
+
+                source_text = flashcard.source_text or ""
+                target_text = flashcard.target_text or ""
+
+                await session.delete(user_flashcard)
+
+        await query.answer("Карточка удалена.")
+
+        confirmation = self._format_flashcard_deleted_message(source_text, target_text)
+
+        try:
+            await query.edit_message_text(
+                confirmation,
+                parse_mode=ParseMode.HTML,
+                reply_markup=None,
+            )
+        except Exception:  # pragma: no cover - best effort update
+            LOGGER.debug("Could not update flashcard deletion message.", exc_info=True)
+            with suppress(Exception):
+                await message.reply_text(
+                    confirmation,
+                    parse_mode=ParseMode.HTML,
+                )
 
     async def handle_take_flashcard(
         self,
