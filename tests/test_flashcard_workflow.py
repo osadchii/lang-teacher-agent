@@ -132,3 +132,65 @@ def test_system_prompt_discourages_extra_variants(session_factory) -> None:
     prompt = workflow._system_prompt
     assert "Only produce flashcards for the exact terms explicitly requested" in prompt
     assert "Do not add extra grammatical variants" in prompt
+
+
+@pytest.mark.asyncio
+async def test_workflow_prevents_duplicate_by_source_text(session_factory) -> None:
+    """Test that workflow prevents adding same Greek word even with different translation."""
+    # First card: λόγος -> слово
+    client_first = _StubClient(FLASHCARD_JSON)
+    workflow_first = FlashcardWorkflow(
+        client=client_first,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    result_first = await workflow_first.handle(777, "Добавь слово λόγος в карточки")
+    assert result_first.handled is True
+    assert len(result_first.summaries) == 1
+    assert result_first.summaries[0].status == "created"
+    assert result_first.summaries[0].source_text == "λόγος"
+    assert result_first.summaries[0].target_text == "слово"
+
+    # Second attempt: λόγος with different translation -> речь
+    different_translation_json = """
+    {
+      "should_add": true,
+      "flashcards": [
+        {
+          "source_text": "λόγος",
+          "target_text": "речь",
+          "example": "Λόγος τίμησης.",
+          "example_translation": "Речь чести."
+        }
+      ]
+    }
+    """
+    client_second = _StubClient(different_translation_json)
+    workflow_second = FlashcardWorkflow(
+        client=client_second,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    result_second = await workflow_second.handle(777, "Добавь λόγος со значением речь")
+    assert result_second.handled is True
+    assert len(result_second.summaries) == 1
+    # Should return existing card with original translation
+    assert result_second.summaries[0].status == "existing"
+    assert result_second.summaries[0].source_text == "λόγος"
+    assert result_second.summaries[0].target_text == "слово"  # Original translation
+
+    # Verify only one flashcard exists for this user
+    async with session_factory() as session:
+        from src.db import UserFlashcard
+        from sqlalchemy import select
+
+        stmt = select(UserFlashcard).where(UserFlashcard.chat_id == 777)
+        result = await session.execute(stmt)
+        user_cards = result.scalars().all()
+        assert len(user_cards) == 1

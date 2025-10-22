@@ -39,6 +39,29 @@ class FlashcardPayload:
         )
 
 
+async def get_user_flashcard_by_source_text(
+    session: AsyncSession,
+    chat_id: int,
+    source_text: str,
+    source_lang: Optional[str] = None,
+) -> Optional[UserFlashcard]:
+    """Find user's flashcard by source_text, regardless of translation."""
+    normalized_source = source_text.strip()
+
+    stmt = (
+        select(UserFlashcard)
+        .options(selectinload(UserFlashcard.flashcard))
+        .join(Flashcard)
+        .where(
+            UserFlashcard.chat_id == chat_id,
+            Flashcard.source_text == normalized_source,
+            Flashcard.source_lang.is_(source_lang) if source_lang is None else Flashcard.source_lang == source_lang,
+        )
+    )
+    result = await session.execute(stmt)
+    return result.scalars().first()
+
+
 async def get_or_create_flashcard(
     session: AsyncSession, payload: FlashcardPayload
 ) -> tuple[Flashcard, bool]:
