@@ -149,6 +149,10 @@ class FlashcardWorkflow:
             max_cards=self._max_cards_per_message,
         )
 
+    def is_probable_request(self, message: str) -> bool:
+        """Heuristic helper to detect if a message might contain flashcard content."""
+        return self._looks_like_flashcard_request(message)
+
     @staticmethod
     def _looks_like_flashcard_request(message: str) -> bool:
         normalized = message.strip().lower()

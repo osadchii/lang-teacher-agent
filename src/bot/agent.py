@@ -170,6 +170,42 @@ class GreekTeacherAgent:
             )
             self._record_interaction(chat.id, user_message, reply)
 
+    async def handle_start(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Send a welcome message in Russian and Greek describing the bot's abilities."""
+        if not update.message:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            return
+
+        user = update.effective_user
+        if user is not None:
+            await self._store_user_profile(
+                chat.id,
+                getattr(user, "first_name", None),
+                getattr(user, "last_name", None),
+            )
+
+        greeting = (
+            "Привет! Я твой виртуальный преподаватель греческого.\n"
+            "Вот чем могу помочь:\n"
+            "- объяснять правила греческого языка;\n"
+            "- помогать с переводами слов и фраз;\n"
+            "- тренироваться с флеш-карточками для запоминания слов.\n\n"
+            "Γεια σου! Είμαι ο ψηφιακός σου καθηγητής ελληνικών.\n"
+            "Μπορώ να βοηθήσω με:\n"
+            "- επεξήγηση γραμματικών κανόνων στα ελληνικά,\n"
+            "- μεταφράσεις λέξεων και φράσεων,\n"
+            "- εξάσκηση με κάρτες μνήμης για να θυμάσαι λεξιλόγιο."
+        )
+
+        await update.message.reply_text(greeting, parse_mode=ParseMode.MARKDOWN)
+
     def _build_flashcard_context(self, chat_id: int) -> Optional[str]:
         """Return the most recent exchange to help flashcard extraction."""
         history = self._get_history(chat_id)
@@ -200,20 +236,40 @@ class GreekTeacherAgent:
             return None
 
         context_payload = self._build_flashcard_context(chat_id)
+        progress_message = None
+        if self._flashcard_workflow.is_probable_request(user_message):
+            with suppress(Exception):
+                progress_message = await update.message.reply_text("Готовлю карточки...")
+
         result = await self._flashcard_workflow.handle(
             chat_id,
             user_message,
             context=context_payload,
         )
         if not result.summaries and not result.errors:
+            if progress_message is not None:
+                fallback_text = result.reason or "Карточки не распознаны."
+                try:
+                    await progress_message.edit_text(fallback_text)
+                except Exception:  # pragma: no cover - best effort status update
+                    LOGGER.debug("Could not update flashcard progress message.", exc_info=True)
             return result
 
         acknowledgement = self._format_flashcard_acknowledgement(result)
         if acknowledgement:
-            await update.message.reply_text(
-                acknowledgement,
-                reply_markup=self._build_take_card_markup(),
-            )
+            markup = self._build_take_card_markup()
+            if progress_message is not None:
+                try:
+                    await progress_message.edit_text(acknowledgement, reply_markup=markup)
+                except Exception:  # pragma: no cover - best effort status update
+                    LOGGER.debug("Could not edit flashcard progress message.", exc_info=True)
+                    with suppress(Exception):
+                        await progress_message.delete()
+                    await update.message.reply_text(
+                        acknowledgement,
+                        reply_markup=markup,
+                    )
+            return result
 
         return result
 
