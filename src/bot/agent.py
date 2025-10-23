@@ -545,7 +545,7 @@ class GreekTeacherAgent:
         lines = ["<b>Эти карточки уже есть у тебя:</b>"]
         for summary in summaries:
             lines.append(
-                f"- {self._escape_html(summary.source_text)} &mdash; {self._escape_html(summary.target_text)}"
+                f"- {self._escape_html(summary.source_text)} — {self._escape_html(summary.target_text)}"
             )
         return "\n".join(lines).strip()
 
