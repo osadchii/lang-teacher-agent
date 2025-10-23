@@ -89,7 +89,7 @@ jobs:
           port: ${{ secrets.RPI_PORT }}
           username: ${{ secrets.RPI_USER }}
           key: ${{ secrets.RPI_SSH_KEY }}
-          source: "docker-compose.yml,.env.example,static"
+          source: "docker-compose.yml,.env.example"
           target: "/opt/lang-teacher"
 
       - name: Apply docker compose release

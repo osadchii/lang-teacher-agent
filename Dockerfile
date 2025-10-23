@@ -11,6 +11,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
+COPY static ./static
 COPY src ./src
 
 CMD ["python", "-m", "src.main"]
