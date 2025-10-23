@@ -35,7 +35,12 @@ from src.db.flashcards import (
     get_or_create_flashcard,
     record_flashcard_review,
 )
-from src.db.users import upsert_user
+from src.db.users import (
+    UserStatistics,
+    get_user_statistics,
+    increment_user_statistics,
+    upsert_user,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -186,6 +191,45 @@ class GreekTeacherAgent:
         except Exception:  # pragma: no cover - guardrail against database issues
             LOGGER.exception("Failed to upsert Telegram user record for chat %s.", chat_id)
 
+    async def _increment_user_stats(
+        self,
+        chat_id: int,
+        *,
+        questions: int = 0,
+        added: int = 0,
+        reviewed: int = 0,
+        mastered: int = 0,
+    ) -> None:
+        """Increment user statistics counters, ignoring errors."""
+        if self._session_factory is None:
+            return
+
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await increment_user_statistics(
+                        session,
+                        chat_id,
+                        questions=questions,
+                        added=added,
+                        reviewed=reviewed,
+                        mastered=mastered,
+                    )
+        except Exception:  # pragma: no cover - guardrail against database issues
+            LOGGER.exception("Failed to update statistics for chat %s.", chat_id)
+
+    async def _fetch_user_statistics(self, chat_id: int) -> Optional[UserStatistics]:
+        """Load persisted statistics for a user, returning None on failure."""
+        if self._session_factory is None:
+            return None
+
+        try:
+            async with self._session_factory() as session:
+                return await get_user_statistics(session, chat_id)
+        except Exception:  # pragma: no cover - guardrail against database issues
+            LOGGER.exception("Failed to load statistics for chat %s.", chat_id)
+            return None
+
     def _build_messages(self, chat_id: int, user_message: str) -> List[Dict[str, str]]:
         """Compose the conversation context to send to the OpenAI Responses API."""
         messages: List[Dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
@@ -260,6 +304,7 @@ class GreekTeacherAgent:
                 reply_markup=self._build_take_card_markup(),
             )
             self._record_interaction(chat.id, user_message, reply)
+            await self._increment_user_stats(chat.id, questions=1)
 
     async def handle_start(
         self,
@@ -296,6 +341,63 @@ class GreekTeacherAgent:
         )
 
         await update.message.reply_text(greeting, parse_mode=ParseMode.MARKDOWN)
+
+    async def handle_stat(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Present a formatted progress dashboard for the current user."""
+        if not update.message:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            return
+
+        user = update.effective_user
+        if user is not None:
+            await self._store_user_profile(
+                chat.id,
+                getattr(user, "first_name", None),
+                getattr(user, "last_name", None),
+            )
+
+        stats = await self._fetch_user_statistics(chat.id)
+        if stats is None:
+            await update.message.reply_text("Статистика появится после первых занятий.")
+            return
+
+        created_at = stats.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        days_active = (now.date() - created_at.date()).days + 1
+        if days_active < 1:
+            days_active = 1
+
+        avg_per_day = stats.flashcards_reviewed / days_active if stats.flashcards_reviewed else 0.0
+        display_name = stats.first_name or stats.last_name or "студент"
+
+        message_lines = [
+            "📊 <b>Статистика обучения</b>",
+            f"👤 {display_name}",
+            f"🗓 С {created_at.strftime('%d.%m.%Y')}",
+            "",
+            f"❓ <b>Вопросов преподавателю:</b> {stats.questions_asked}",
+            f"🆕 <b>Добавлено карточек:</b> {stats.flashcards_added}",
+            f"🔁 <b>Повторено карточек:</b> {stats.flashcards_reviewed}",
+            f"🌟 <b>Отлично выучено (5/5):</b> {stats.flashcards_mastered}",
+            f"⚡️ <b>Средний темп:</b> {avg_per_day:.2f} в день",
+        ]
+
+        await update.message.reply_text(
+            "\n".join(message_lines),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def handle_add_500_common_words(
         self,
@@ -364,6 +466,9 @@ class GreekTeacherAgent:
         )
 
         if added_count:
+            await self._increment_user_stats(chat.id, added=added_count)
+
+        if added_count:
             intro = f"Список из {total_words} слов готов!"
         else:
             intro = f"Все {total_words} слов уже были в твоей коллекции!"
@@ -420,6 +525,9 @@ class GreekTeacherAgent:
             user_message,
             context=context_payload,
         )
+        created_cards = sum(1 for summary in result.summaries if summary.status == "created")
+        if created_cards:
+            await self._increment_user_stats(chat_id, added=created_cards)
         if not result.summaries and not result.errors:
             if progress_message is not None:
                 fallback_text = result.reason or "Карточки не распознаны."
@@ -822,6 +930,15 @@ class GreekTeacherAgent:
             return
 
         chat_id = message.chat.id
+
+        from_user = getattr(query, "from_user", None)
+        if from_user is not None:
+            await self._store_user_profile(
+                chat_id,
+                getattr(from_user, "first_name", None),
+                getattr(from_user, "last_name", None),
+            )
+
         now = datetime.now(timezone.utc)
 
         async with self._session_factory() as session:
@@ -853,6 +970,12 @@ class GreekTeacherAgent:
                     interval=schedule.interval,
                     repetition=schedule.repetition,
                     now=now,
+                )
+                await increment_user_statistics(
+                    session,
+                    chat_id,
+                    reviewed=1,
+                    mastered=1 if score == 5 else 0,
                 )
 
         try:

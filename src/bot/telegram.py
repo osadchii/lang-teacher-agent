@@ -16,6 +16,7 @@ def build_application(bot_token: str, agent: GreekTeacherAgent) -> Application:
     """Configure the Telegram application instance."""
     application = ApplicationBuilder().token(bot_token).build()
     application.add_handler(CommandHandler("start", agent.handle_start))
+    application.add_handler(CommandHandler("stat", agent.handle_stat))
     application.add_handler(CommandHandler("add_500_common_words", agent.handle_add_500_common_words))
     application.add_handler(CallbackQueryHandler(agent.handle_take_flashcard, pattern="^fc_take$"))
     application.add_handler(CallbackQueryHandler(agent.handle_delete_flashcard, pattern=r"^fc_delete:"))
