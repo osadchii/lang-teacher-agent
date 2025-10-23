@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import logging
 import random
-from html import escape
 from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
+from html import escape
+from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
 
 from openai import AsyncOpenAI
@@ -26,7 +28,13 @@ from src.bot.flashcard_workflow import (
 from src.bot.openai_utils import extract_output_text
 from src.bot.srs import calculate_next_schedule
 from src.db import UserFlashcard
-from src.db.flashcards import get_next_flashcard_for_user, record_flashcard_review
+from src.db.flashcards import (
+    FlashcardPayload,
+    ensure_user_flashcard,
+    get_next_flashcard_for_user,
+    get_or_create_flashcard,
+    record_flashcard_review,
+)
 from src.db.users import upsert_user
 
 
@@ -68,6 +76,8 @@ class GreekTeacherAgent:
                 target_language=flashcard_target_language,
                 max_cards_per_message=flashcard_max_cards,
             )
+        self._common_words_path = Path(__file__).resolve().parents[2] / "static" / "greek_top_500_words.csv"
+        self._common_words_cache: Optional[List[FlashcardPayload]] = None
 
     def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
         """Return the rolling history buffer for a chat, creating it when needed."""
@@ -81,6 +91,83 @@ class GreekTeacherAgent:
         """Persist the most recent user/assistant exchange for the chat."""
         history = self._get_history(chat_id)
         history.append((user_message, assistant_reply))
+
+    def _load_common_flashcards(self) -> List[FlashcardPayload]:
+        """Load and cache flashcard payloads for the 500 most common words."""
+        if self._common_words_cache is not None:
+            return self._common_words_cache
+
+        entries: List[FlashcardPayload] = []
+        try:
+            with self._common_words_path.open("r", encoding="utf-8-sig") as csv_file:
+                reader = csv.reader(csv_file, delimiter=";")
+                next(reader, None)  # discard header
+                for row_index, row in enumerate(reader, start=2):
+                    if not row:
+                        continue
+                    source = row[0].strip()
+                    target = row[1].strip() if len(row) > 1 else ""
+                    example = row[2].strip() if len(row) > 2 else ""
+                    if not source or not target:
+                        LOGGER.debug(
+                            "Skipping incomplete common words row %s: %s",
+                            row_index,
+                            row,
+                        )
+                        continue
+                    entries.append(
+                        FlashcardPayload(
+                            source_text=source,
+                            target_text=target,
+                            example=example or None,
+                            source_lang=self._flashcard_source_language,
+                            target_lang=self._flashcard_target_language,
+                        )
+                    )
+        except FileNotFoundError as exc:
+            raise RuntimeError("Common words CSV file is missing.") from exc
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            raise RuntimeError("Failed to load common words CSV file.") from exc
+
+        self._common_words_cache = entries
+        return entries
+
+    async def _ensure_common_flashcards(
+        self,
+        session: AsyncSession,
+        chat_id: int,
+        *,
+        now: Optional[datetime] = None,
+    ) -> Tuple[int, int, int, int]:
+        """Ensure the shared and user-specific flashcards exist for the common words."""
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        payloads = self._load_common_flashcards()
+        created_flashcards = 0
+        new_user_links = 0
+        already_had_links = 0
+        reactivated_links = 0
+
+        for payload in payloads:
+            flashcard, created = await get_or_create_flashcard(session, payload)
+            if created:
+                created_flashcards += 1
+
+            _, user_created, reactivated = await ensure_user_flashcard(
+                session=session,
+                chat_id=chat_id,
+                flashcard=flashcard,
+                now=now,
+            )
+            if user_created:
+                new_user_links += 1
+            else:
+                already_had_links += 1
+            if reactivated:
+                reactivated_links += 1
+
+        return created_flashcards, new_user_links, already_had_links, reactivated_links
 
     async def _store_user_profile(
         self,
@@ -209,6 +296,89 @@ class GreekTeacherAgent:
         )
 
         await update.message.reply_text(greeting, parse_mode=ParseMode.MARKDOWN)
+
+    async def handle_add_500_common_words(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Import shared flashcards for the most common Greek words and attach them to the user."""
+        if not update.message:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            return
+
+        if self._session_factory is None:
+            await update.message.reply_text("Хранилище карточек недоступно в этой конфигурации.")
+            return
+
+        user = update.effective_user
+        if user is not None:
+            await self._store_user_profile(
+                chat.id,
+                getattr(user, "first_name", None),
+                getattr(user, "last_name", None),
+            )
+
+        try:
+            payloads = self._load_common_flashcards()
+        except Exception:
+            LOGGER.exception("Failed to load the top 500 Greek words from CSV.")
+            await update.message.reply_text(
+                "Не удалось загрузить список популярных слов. Попробуй позже."
+            )
+            return
+
+        total_words = len(payloads)
+        now = datetime.now(timezone.utc)
+
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    (
+                        created_count,
+                        added_count,
+                        already_had_count,
+                        reactivated_count,
+                    ) = await self._ensure_common_flashcards(
+                        session,
+                        chat.id,
+                        now=now,
+                    )
+        except Exception:
+            LOGGER.exception("Failed to persist common words for chat %s.", chat.id)
+            await update.message.reply_text(
+                "Не удалось добавить карточки. Попробуй позже."
+            )
+            return
+
+        LOGGER.info(
+            "Common word import for chat %s completed: created=%s, new_links=%s, already_had=%s, reactivated=%s.",
+            chat.id,
+            created_count,
+            added_count,
+            already_had_count,
+            reactivated_count,
+        )
+
+        if added_count:
+            intro = f"Список из {total_words} слов готов!"
+        else:
+            intro = f"Все {total_words} слов уже были в твоей коллекции!"
+
+        message_lines = [intro]
+        if added_count:
+            message_lines.append(f"Добавлено новых карточек: {added_count}.")
+        if added_count and already_had_count:
+            message_lines.append(f"Ещё {already_had_count} уже были у тебя.")
+        message_lines.append("Можешь тренироваться, нажав «Взять карточку».")
+
+        await update.message.reply_text(
+            "\n".join(message_lines),
+            reply_markup=self._build_take_card_markup(),
+        )
 
     def _build_flashcard_context(self, chat_id: int) -> Optional[str]:
         """Return the most recent exchange to help flashcard extraction."""
