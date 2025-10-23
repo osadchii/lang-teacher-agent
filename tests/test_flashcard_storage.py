@@ -173,3 +173,28 @@ async def test_get_user_flashcard_by_source_text_ignores_translation(
     assert found is not None
     assert found.flashcard.source_text == "φίλος"
     assert found.flashcard.target_text == "друг"  # Original translation
+
+
+@pytest.mark.asyncio
+async def test_flashcard_creation_normalizes_casing(session_factory) -> None:
+    payload_upper = FlashcardPayload(
+        source_text="Λόγος",
+        target_text="СЛОВО",
+    )
+    payload_lower = FlashcardPayload(
+        source_text="λόγος",
+        target_text="слово",
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            first_flashcard, created_first = await get_or_create_flashcard(session, payload_upper)
+        async with session.begin():
+            second_flashcard, created_second = await get_or_create_flashcard(session, payload_lower)
+
+    assert created_first is True
+    assert created_second is False
+    assert first_flashcard.source_text == "λόγος"
+    assert first_flashcard.target_text == "слово"
+    assert second_flashcard.source_text == "λόγος"
+    assert second_flashcard.target_text == "слово"

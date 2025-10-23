@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -28,14 +28,29 @@ class FlashcardPayload:
     tags: Optional[str] = None
 
     def normalized(self) -> "FlashcardPayload":
-        """Return a payload with leading/trailing whitespace stripped."""
+        """Return a payload with normalized casing and whitespace."""
+
+        def _normalize(value: object, *, make_lower: bool = False) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            collapsed = " ".join(value.split())
+            if not collapsed:
+                return None
+            return collapsed.lower() if make_lower else collapsed
+
+        def _normalize_optional(value: object) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            collapsed = " ".join(value.split())
+            return collapsed or None
+
         return FlashcardPayload(
-            source_text=self.source_text.strip(),
-            target_text=self.target_text.strip(),
-            example=self.example.strip() if isinstance(self.example, str) else self.example,
-            source_lang=self.source_lang.strip() if isinstance(self.source_lang, str) else self.source_lang,
-            target_lang=self.target_lang.strip() if isinstance(self.target_lang, str) else self.target_lang,
-            tags=self.tags.strip() if isinstance(self.tags, str) else self.tags,
+            source_text=_normalize(self.source_text, make_lower=True) or "",
+            target_text=_normalize(self.target_text, make_lower=True) or "",
+            example=_normalize_optional(self.example),
+            source_lang=_normalize_optional(self.source_lang),
+            target_lang=_normalize_optional(self.target_lang),
+            tags=_normalize_optional(self.tags),
         )
 
 
@@ -46,7 +61,12 @@ async def get_user_flashcard_by_source_text(
     source_lang: Optional[str] = None,
 ) -> Optional[UserFlashcard]:
     """Find user's flashcard by source_text, regardless of translation."""
-    normalized_source = source_text.strip()
+    if not isinstance(source_text, str):
+        return None
+    normalized_source = " ".join(source_text.split()).lower()
+    normalized_source_lang = (
+        " ".join(source_lang.split()) if isinstance(source_lang, str) else None
+    )
 
     stmt = (
         select(UserFlashcard)
@@ -54,8 +74,12 @@ async def get_user_flashcard_by_source_text(
         .join(Flashcard)
         .where(
             UserFlashcard.chat_id == chat_id,
-            Flashcard.source_text == normalized_source,
-            Flashcard.source_lang.is_(source_lang) if source_lang is None else Flashcard.source_lang == source_lang,
+            func.lower(Flashcard.source_text) == normalized_source,
+            (
+                Flashcard.source_lang.is_(normalized_source_lang)
+                if normalized_source_lang is None
+                else Flashcard.source_lang == normalized_source_lang
+            ),
         )
     )
     result = await session.execute(stmt)
@@ -80,6 +104,18 @@ async def get_or_create_flashcard(
     if flashcard is not None:
         # Update missing optional details if the newly provided payload is richer.
         has_changes = False
+        if flashcard.source_text != normalized.source_text:
+            flashcard.source_text = normalized.source_text
+            has_changes = True
+        if flashcard.target_text != normalized.target_text:
+            flashcard.target_text = normalized.target_text
+            has_changes = True
+        if normalized.source_lang is not None and flashcard.source_lang != normalized.source_lang:
+            flashcard.source_lang = normalized.source_lang
+            has_changes = True
+        if normalized.target_lang is not None and flashcard.target_lang != normalized.target_lang:
+            flashcard.target_lang = normalized.target_lang
+            has_changes = True
         if normalized.example and not flashcard.example:
             flashcard.example = normalized.example
             has_changes = True

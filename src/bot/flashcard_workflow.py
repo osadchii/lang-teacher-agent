@@ -305,7 +305,7 @@ class FlashcardWorkflow:
         card: GeneratedFlashcard,
     ) -> Optional[FlashcardSummary]:
         now = datetime.now(timezone.utc)
-        payload = card.to_payload(self._source_language, self._target_language)
+        payload = card.to_payload(self._source_language, self._target_language).normalized()
 
         # Check if user already has a card with this Greek word
         existing_user_card = await get_user_flashcard_by_source_text(
