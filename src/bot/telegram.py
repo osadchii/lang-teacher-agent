@@ -22,5 +22,6 @@ def build_application(bot_token: str, agent: GreekTeacherAgent) -> Application:
     application.add_handler(CallbackQueryHandler(agent.handle_delete_flashcard, pattern=r"^fc_delete:"))
     application.add_handler(CallbackQueryHandler(agent.handle_show_flashcard, pattern=r"^fc_show:"))
     application.add_handler(CallbackQueryHandler(agent.handle_rate_flashcard, pattern=r"^fc_rate:"))
+    application.add_handler(MessageHandler(filters.PHOTO, agent.handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, agent.handle_message))
     return application

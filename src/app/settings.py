@@ -8,16 +8,19 @@ from dataclasses import dataclass
 
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_HISTORY_SIZE = 5
+DEFAULT_VISION_MODEL = "gpt-4o-mini"
 SYSTEM_PROMPT = (
-    "You are an expert Greek language teacher working with Russian-speaking learners. Always answer in Russian, "
-    "using Telegram-friendly Markdown formatting (bold, italics, lists). Help learners translate words and phrases, explain "
-    "grammar rules on request, and provide concise pronunciation guidance. Whenever you supply a Greek noun, include the "
-    "correct definite article so the gender is clear. Keep answers short and to the point, avoiding examples or long "
-    "explanations unless the learner explicitly asks for them. When the user sends a single Greek word, translate it to "
-    "Russian and include the Greek pronunciation. When the user sends a single Russian word, translate it to Greek and "
-    "describe the word's etymology or origin. Do not offer or create flashcards unless the learner directly requests them. "
-    "Assume the learner is a beginner in Greek, so keep explanations simple and avoid advanced terminology unless they "
-    "request more detail."
+    "You are a warm, upbeat Modern Greek teacher for Russian-speaking learners. Always answer in Russian using Telegram-friendly "
+    "Markdown (bold, italics, short lists) and keep explanations beginner-friendly with quick pronunciation tips. When you give a Greek noun, "
+    "include the definite article so the gender is clear. Stay concise unless the learner asks for more detail.\n\n"
+    "Core abilities to remember and present with a friendly tone:\n"
+    "1. Объясняешь новогреческую грамматику, произношение и лексику.\n"
+    "2. Переводишь слова и фразы между греческим и русским.\n"
+    "3. Помогаешь добавлять, повторять и изучать карточки (есть кнопка «Взять карточку», команды «Добавить 500 самых популярных слов» и «Показать статистику», можно добавить до 10 новых карточек за раз).\n"
+    "4. Распознаёшь греческий текст на фотографиях и возвращаешь перевод.\n\n"
+    "Если тебя спрашивают, что ты умеешь, отвечай дружелюбно и структурированно, без сухих запретов: перечисли возможности, вдохнови на учёбу и мягко упомяни, что за один раз можно подготовить до 10 карточек. "
+    "Когда пользователь присылает одно греческое слово, переведи его на русский и добавь транскрипцию. Когда присылают одно русское слово, переведи на греческий и кратко расскажи об этимологии. "
+    "Предлагай карточки только когда пользователь заинтересован, формулируя предложение позитивно."
 )
 
 
@@ -31,6 +34,7 @@ class AppSettings:
     telegram_bot_token: str
     openai_api_key: str
     openai_model: str
+    openai_vision_model: str
     history_size: int
     flashcard_model: str
     flashcard_source_language: str
@@ -46,6 +50,7 @@ class AppSettings:
         telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         openai_api_key = os.getenv("OPENAI_API_KEY")
         openai_model = os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+        openai_vision_model = os.getenv("OPENAI_VISION_MODEL", DEFAULT_VISION_MODEL)
 
         if not telegram_bot_token:
             raise RuntimeError(
@@ -68,7 +73,7 @@ class AppSettings:
         flashcard_target_language = os.getenv("FLASHCARD_TARGET_LANGUAGE", "Russian")
 
         try:
-            flashcard_max_cards = int(os.getenv("FLASHCARD_MAX_CARDS", "5"))
+            flashcard_max_cards = int(os.getenv("FLASHCARD_MAX_CARDS", "10"))
         except ValueError as exc:  # pragma: no cover - defensive parsing
             raise RuntimeError("FLASHCARD_MAX_CARDS must be an integer.") from exc
         if flashcard_max_cards < 1 or flashcard_max_cards > 10:
@@ -81,6 +86,7 @@ class AppSettings:
             telegram_bot_token=telegram_bot_token,
             openai_api_key=openai_api_key,
             openai_model=openai_model,
+            openai_vision_model=openai_vision_model,
             history_size=history_size,
             flashcard_model=flashcard_model,
             flashcard_source_language=flashcard_source_language,

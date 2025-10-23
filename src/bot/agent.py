@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
+import imghdr
+import json
 import logging
 import random
 from collections import deque
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
+from io import BytesIO
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -46,6 +51,19 @@ from src.db.users import (
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class ImageTextResult:
+    """Structured result for OCR + translation of Greek text found in images."""
+
+    greek_text: str
+    translation: str
+    words: List[Tuple[str, str]]
+
+    @property
+    def word_count(self) -> int:
+        return len(self.words)
+
+
 class GreekTeacherAgent:
     """Handles Telegram messages by delegating to an OpenAI Greek teacher model."""
 
@@ -59,10 +77,12 @@ class GreekTeacherAgent:
         flashcard_model: Optional[str] = None,
         flashcard_source_language: str = "Greek",
         flashcard_target_language: str = "Russian",
-        flashcard_max_cards: int = 5,
+        flashcard_max_cards: int = 10,
+        vision_model: Optional[str] = None,
     ) -> None:
         self._client = client
         self._model = model
+        self._vision_model = vision_model or model
         self._system_prompt = system_prompt
         self._history_size = history_size
         self._history: Dict[int, Deque[Tuple[str, str]]] = {}
@@ -136,6 +156,194 @@ class GreekTeacherAgent:
 
         self._common_words_cache = entries
         return entries
+
+    async def _download_photo_bytes(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        file_id: str,
+    ) -> bytes:
+        """Download a Telegram photo by file_id and return its raw bytes."""
+        telegram_file = await context.bot.get_file(file_id)
+        buffer = BytesIO()
+        await telegram_file.download_to_memory(out=buffer)
+        return buffer.getvalue()
+
+    async def _extract_greek_text_from_image(
+        self,
+        image_bytes: bytes,
+        chat_id: Optional[int] = None,
+    ) -> Optional[ImageTextResult]:
+        """Send an image to OpenAI and parse the detected Greek text plus translation."""
+        encoded_image = base64.b64encode(image_bytes).decode("ascii")
+        image_format = imghdr.what(None, image_bytes)
+        if image_format == "jpeg":
+            mime_type = "image/jpeg"
+        elif image_format == "png":
+            mime_type = "image/png"
+        elif image_format == "gif":
+            mime_type = "image/gif"
+        else:
+            mime_type = "image/jpeg"
+        data_url = f"data:{mime_type};base64,{encoded_image}"
+
+        try:
+            response = await self._client.responses.create(
+                model=self._vision_model,
+                input=[
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "You extract Modern Greek text from images and translate it into Russian. "
+                                    "Always respond with strict JSON using the schema: "
+                                    '{"status": "ok" | "no_greek", "greek_text": string, "translation": string, '
+                                    '"words": [{"greek": string, "translation": string}]}. '
+                                    "Treat only characters from the Greek alphabet (including tonos) as Greek text. "
+                                    "If there is no Greek text, use status \"no_greek\" and leave other fields empty. "
+                                    "Limit the words list to at most 10 unique Greek words in the order they appear, "
+                                    "and provide their Russian translations when possible."
+                                ),
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Найди весь греческий текст на изображении, выпиши его без изменений и переведи на русский.",
+                            },
+                            {"type": "input_image", "image_url": data_url},
+                        ],
+                    },
+                ],
+            )
+        except Exception as exc:  # pragma: no cover - network errors
+            LOGGER.exception("Failed OCR request%s.", f" for chat {chat_id}" if chat_id else "")
+            raise RuntimeError("Failed to request image recognition.") from exc
+
+        raw_text = extract_output_text(response).strip()
+        LOGGER.debug("OCR raw response%s: %s", f" for chat {chat_id}" if chat_id else "", raw_text[:500])
+        cleaned = self._strip_code_fences(raw_text)
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            LOGGER.warning("Malformed OCR response: %s", raw_text)
+            raise RuntimeError("Image recognition returned malformed data.") from exc
+
+        status = str(payload.get("status") or "").lower()
+        greek_text = (payload.get("greek_text") or "").strip()
+        translation = (payload.get("translation") or "").strip()
+
+        if not greek_text:
+            candidate = payload.get("text") or payload.get("raw_text")
+            if isinstance(candidate, str):
+                greek_text = candidate.strip()
+
+        if not greek_text:
+            lines_field = payload.get("lines")
+            if isinstance(lines_field, list):
+                collected: List[str] = []
+                for entry in lines_field:
+                    if isinstance(entry, str):
+                        stripped_entry = entry.strip()
+                        if stripped_entry and self._contains_greek_characters(stripped_entry):
+                            collected.append(stripped_entry)
+                if collected:
+                    greek_text = "\n".join(collected)
+
+        if status == "no_greek":
+            LOGGER.info(
+                "OCR reported no Greek text%s. keys=%s",
+                f" for chat {chat_id}" if chat_id else "",
+                list(payload.keys()),
+            )
+            return None
+
+        if not greek_text or not self._contains_greek_characters(greek_text):
+            LOGGER.info(
+                "OCR could not confirm Greek text%s. status=%s detected_text_preview=%r",
+                f" for chat {chat_id}" if chat_id else "",
+                status or "missing",
+                (greek_text or "")[:120],
+            )
+            return None
+
+        raw_words = payload.get("words") or []
+        words: List[Tuple[str, str]] = []
+        for entry in raw_words:
+            if not isinstance(entry, dict):
+                continue
+            greek_word = str(entry.get("greek") or "").strip()
+            translation_word = str(entry.get("translation") or "").strip()
+            if greek_word:
+                words.append((greek_word, translation_word))
+            if len(words) >= 10:
+                break
+
+        LOGGER.info(
+            "OCR success%s. status=%s greek_chars=%d translation_chars=%d words=%d",
+            f" for chat {chat_id}" if chat_id else "",
+            status or "missing",
+            len(greek_text),
+            len(translation),
+            len(words),
+        )
+
+        return ImageTextResult(
+            greek_text=greek_text,
+            translation=translation,
+            words=words,
+        )
+
+    @staticmethod
+    def _strip_code_fences(response_text: str) -> str:
+        """Remove optional Markdown fences around JSON responses."""
+        stripped = response_text.strip()
+        if stripped.startswith("```") and stripped.endswith("```"):
+            body = stripped.split("\n", 1)
+            if len(body) == 2:
+                content = body[1].rsplit("\n", 1)
+                if len(content) == 2:
+                    return content[0]
+        return stripped
+
+    @staticmethod
+    def _contains_greek_characters(text: str) -> bool:
+        """Check if the provided text includes any Greek alphabet characters."""
+        for char in text:
+            code_point = ord(char)
+            if 0x0370 <= code_point <= 0x03FF or 0x1F00 <= code_point <= 0x1FFF:
+                return True
+        return False
+
+    def _format_image_result_message(self, result: ImageTextResult) -> str:
+        """Compose an HTML response summarizing OCR findings and translation."""
+        lines: List[str] = [
+            "<b>Найденный греческий текст:</b>",
+            f"<pre>{self._escape_html(result.greek_text)}</pre>",
+            "<b>Перевод:</b>",
+            self._escape_html(result.translation or "Перевод нужно уточнить."),
+        ]
+
+        if result.words:
+            lines.append("")
+            lines.append("<b>Слова из текста:</b>")
+            for greek_word, russian_word in result.words:
+                if russian_word:
+                    lines.append(f"- {self._escape_html(greek_word)} - {self._escape_html(russian_word)}")
+                else:
+                    lines.append(f"- {self._escape_html(greek_word)} - перевод нужно уточнить")
+
+        if 0 < result.word_count <= 5:
+            lines.append("")
+            lines.append(
+                "Если хочешь, помогу добавить эти слова в карточки (до 10 за раз) — просто напиши."
+            )
+
+        return "\n".join(lines).strip()
 
     async def _ensure_common_flashcards(
         self,
@@ -305,6 +513,69 @@ class GreekTeacherAgent:
             )
             self._record_interaction(chat.id, user_message, reply)
             await self._increment_user_stats(chat.id, questions=1)
+
+    async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Process a photo, extract Greek text, and return a translation."""
+        message = update.message
+        if not message or not message.photo:
+            return
+
+        chat = update.effective_chat
+        if chat is None:
+            return
+
+        user = update.effective_user
+        if user is not None:
+            await self._store_user_profile(
+                chat.id,
+                getattr(user, "first_name", None),
+                getattr(user, "last_name", None),
+            )
+
+        largest_photo = message.photo[-1]
+        try:
+            image_bytes = await self._download_photo_bytes(context, largest_photo.file_id)
+        except Exception:  # pragma: no cover - network errors
+            LOGGER.exception("Failed to download photo for chat %s.", chat.id)
+            await message.reply_text("Не удалось получить изображение. Попробуй отправить фото ещё раз.")
+            return
+
+        typing_task = asyncio.create_task(self._typing_indicator(chat.id, context))
+        recognition_failed = False
+        result: Optional[ImageTextResult] = None
+
+        try:
+            result = await self._extract_greek_text_from_image(image_bytes, chat_id=chat.id)
+        except RuntimeError:
+            recognition_failed = True
+            LOGGER.exception("Image recognition failed for chat %s.", chat.id)
+        finally:
+            typing_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing_task
+
+        if recognition_failed:
+            reply_text = "Не получилось распознать текст на этом фото. Попробуй ещё раз немного позже."
+            await message.reply_text(reply_text)
+            self._record_interaction(chat.id, "[Фото]", reply_text)
+            await self._increment_user_stats(chat.id, questions=1)
+            return
+
+        if result is None:
+            reply_text = "Похоже, на фото нет греческого текста. Пришли изображение, где текст именно на греческом."
+            await message.reply_text(reply_text)
+            self._record_interaction(chat.id, "[Фото]", reply_text)
+            await self._increment_user_stats(chat.id, questions=1)
+            return
+
+        reply_text = self._format_image_result_message(result)
+        await message.reply_text(
+            reply_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._build_take_card_markup(),
+        )
+        self._record_interaction(chat.id, "[Фото]", reply_text)
+        await self._increment_user_stats(chat.id, questions=1)
 
     async def handle_start(
         self,

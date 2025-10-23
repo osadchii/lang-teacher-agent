@@ -119,7 +119,7 @@ class FlashcardWorkflow:
         session_factory: Optional[async_sessionmaker[AsyncSession]],
         source_language: str,
         target_language: str,
-        max_cards_per_message: int = 5,
+        max_cards_per_message: int = 10,
     ) -> None:
         self._client = client
         self._model = model

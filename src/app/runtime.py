@@ -53,6 +53,7 @@ def run_bot(settings: AppSettings) -> None:
         flashcard_source_language=settings.flashcard_source_language,
         flashcard_target_language=settings.flashcard_target_language,
         flashcard_max_cards=settings.flashcard_max_cards,
+        vision_model=settings.openai_vision_model,
     )
     application = build_application(settings.telegram_bot_token, agent)
 
