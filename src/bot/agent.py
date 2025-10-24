@@ -53,6 +53,20 @@ from src.db.users import (
 LOGGER = logging.getLogger(__name__)
 
 _GREEK_SEQUENCE_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]+(?:[\s\-][\u0370-\u03ff\u1f00-\u1fff]+)*")
+_GREEK_ARTICLE_PREFIXES = (
+    "ο",
+    "η",
+    "το",
+    "οι",
+    "τα",
+    "τον",
+    "την",
+    "τους",
+    "τις",
+    "των",
+    "του",
+    "της",
+)
 
 
 @dataclass(slots=True)
@@ -107,7 +121,7 @@ class GreekTeacherAgent:
             )
         self._common_words_path = Path(__file__).resolve().parents[2] / "static" / "greek_top_500_words.csv"
         self._common_words_cache: Optional[List[FlashcardPayload]] = None
-        self._pending_flashcard_terms: Dict[int, str] = {}
+        self._pending_flashcard_terms: Dict[int, List[str]] = {}
 
     def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
         """Return the rolling history buffer for a chat, creating it when needed."""
@@ -166,6 +180,35 @@ class GreekTeacherAgent:
     def _normalize_greek_term(term: str) -> str:
         cleaned = "".join(ch for ch in term.casefold() if ch.isalnum() or ch.isspace())
         return " ".join(cleaned.split())
+
+    def _build_article_variants(self, term: str) -> List[str]:
+        """Return normalized variants of term with and without Greek articles."""
+        variants: List[str] = []
+        raw = (term or "").strip()
+        if raw:
+            variants.append(raw)
+
+        normalized = self._normalize_greek_term(raw)
+        if normalized:
+            variants.append(normalized)
+            tokens = normalized.split()
+            if tokens and tokens[0] in _GREEK_ARTICLE_PREFIXES and len(tokens) > 1:
+                without_article = " ".join(tokens[1:])
+                if without_article:
+                    variants.append(without_article)
+            else:
+                for article in _GREEK_ARTICLE_PREFIXES:
+                    variants.append(f"{article} {normalized}")
+
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for variant in variants:
+            collapsed = " ".join(variant.split())
+            if not collapsed or collapsed in seen:
+                continue
+            seen.add(collapsed)
+            deduped.append(collapsed)
+        return deduped
 
     @staticmethod
     def _extract_greek_segments(text: Optional[str]) -> List[str]:
@@ -232,21 +275,28 @@ class GreekTeacherAgent:
         if self._session_factory is None:
             return False
 
+        candidates = self._build_article_variants(source_text)
+        if not candidates:
+            return False
+
         try:
             async with self._session_factory() as session:
-                record = await get_user_flashcard_by_source_text(
-                    session,
-                    chat_id,
-                    source_text,
-                    self._flashcard_source_language,
-                )
+                for variant in candidates:
+                    record = await get_user_flashcard_by_source_text(
+                        session,
+                        chat_id,
+                        variant,
+                        self._flashcard_source_language,
+                    )
+                    if record is None:
+                        continue
+                    if record.is_active:
+                        return True
         except Exception:
             LOGGER.exception("Failed to check existing flashcards for chat %s.", chat_id)
             return True
 
-        if record is None:
-            return False
-        return bool(record.is_active)
+        return False
 
     async def _resolve_reply_markup(
         self,
@@ -268,7 +318,7 @@ class GreekTeacherAgent:
             notice = "Это слово уже есть в твоих карточках — потренируйся, чтобы закрепить значение!"
             return self._build_take_card_markup(), notice
 
-        self._pending_flashcard_terms[chat_id] = primary_term
+        self._pending_flashcard_terms[chat_id] = [primary_term]
         return self._build_add_card_markup(), None
 
     @staticmethod
@@ -482,6 +532,141 @@ class GreekTeacherAgent:
 
         return "\n".join(lines).strip()
 
+    def _build_photo_prompt(self, caption: str, result: ImageTextResult) -> str:
+        """Prepare a user message for LLM when a caption accompanies a photo."""
+        caption_text = caption.strip()
+        lines: List[str] = []
+        if caption_text:
+            lines.append(f"Пользователь прислал фотографию с подписью: {caption_text}")
+        else:
+            lines.append("Пользователь прислал фотографию с греческим текстом.")
+
+        lines.append("")
+        lines.append("Распознанный греческий текст с изображения:")
+        lines.append(result.greek_text.strip())
+
+        if result.translation:
+            lines.append("")
+            lines.append("Перевод распознанного текста на русский:")
+            lines.append(result.translation.strip())
+
+        lines.append("")
+        lines.append(
+            "Ответь на просьбу пользователя, используя этот материал. Если он просит проверить ошибки, "
+            "выполнить задание или ответить на вопрос, проанализируй греческий текст и объясни результат по-русски."
+        )
+        return "\n".join(lines).strip()
+
+    def _build_photo_history_entry(
+        self,
+        caption: Optional[str],
+        result: Optional[ImageTextResult],
+    ) -> str:
+        """Compose a history entry describing the processed photo."""
+        lines: List[str] = ["[Фото]"]
+        caption_text = (caption or "").strip()
+        if caption_text:
+            lines.append(f"Подпись: {caption_text}")
+
+        if result is not None:
+            lines.append("Распознанный текст:")
+            lines.append(result.greek_text.strip())
+            if result.translation:
+                lines.append("Перевод:")
+                lines.append(result.translation.strip())
+
+        return "\n".join(lines).strip()
+
+    def _collect_unique_image_words(self, result: ImageTextResult) -> List[Tuple[str, str]]:
+        """Return unique Greek words extracted from OCR, preserving order."""
+        unique: List[Tuple[str, str]] = []
+        seen: set[str] = set()
+        for greek_word, translation_word in result.words:
+            normalized = self._normalize_greek_term(greek_word)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            greek_clean = greek_word.strip()
+            translation_clean = translation_word.strip() if translation_word else ""
+            unique.append((greek_clean, translation_clean))
+        return unique
+
+    def _select_image_words_for_review(self, result: ImageTextResult) -> List[Tuple[str, str]]:
+        """Select 1 or up to 3 key words from the OCR result depending on text length."""
+        unique_words = self._collect_unique_image_words(result)
+        if not unique_words:
+            return []
+
+        limit = 1 if len(unique_words) <= 5 else 3
+        return unique_words[:limit]
+
+    async def _analyze_image_words(
+        self,
+        chat_id: int,
+        result: ImageTextResult,
+    ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], bool]:
+        """
+        Classify highlighted words by whether they already exist in the user's flashcards.
+
+        Returns a tuple of (selected_words, missing_words, checked_flag).
+        """
+        selected_words = self._select_image_words_for_review(result)
+        if not selected_words:
+            return [], [], False
+
+        if self._session_factory is None:
+            return selected_words, [], False
+
+        if self._flashcard_workflow is None:
+            return selected_words, [], False
+
+        missing_words: List[Tuple[str, str]] = []
+        for greek_word, translation_word in selected_words:
+            if await self._user_has_active_flashcard(chat_id, greek_word):
+                continue
+            missing_words.append((greek_word, translation_word))
+
+        return selected_words, missing_words, True
+
+    def _format_image_flashcard_section(
+        self,
+        selected_words: List[Tuple[str, str]],
+        missing_words: List[Tuple[str, str]],
+        checked: bool,
+    ) -> Optional[str]:
+        """Format the section describing highlighted words and flashcard status."""
+        if not selected_words:
+            return None
+
+        lines: List[str] = ["<b>Ключевые слова:</b>"]
+        missing_lookup = {
+            self._normalize_greek_term(greek): translation for greek, translation in missing_words
+        } if checked else {}
+
+        for greek_word, translation_word in selected_words:
+            normalized = self._normalize_greek_term(greek_word)
+            if translation_word:
+                base_line = f"- {self._escape_html(greek_word)} - {self._escape_html(translation_word)}"
+            else:
+                base_line = f"- {self._escape_html(greek_word)}"
+
+            if checked:
+                if normalized in missing_lookup:
+                    base_line += " (нет в карточках)"
+                else:
+                    base_line += " (уже есть в карточках)"
+
+            lines.append(base_line)
+
+        if checked and missing_words:
+            lines.append("")
+            missing_list = ", ".join(self._escape_html(greek) for greek, _ in missing_words)
+            if missing_list:
+                lines.append(f"Предлагаю добавить: {missing_list}.")
+            lines.append("Отсутствующие слова можно добавить в карточки кнопкой ниже.")
+
+        return "\n".join(lines).strip()
+
     async def _ensure_common_flashcards(
         self,
         session: AsyncSession,
@@ -666,8 +851,9 @@ class GreekTeacherAgent:
             self._record_interaction(chat.id, user_message, reply)
             await self._increment_user_stats(chat.id, questions=1)
 
+
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Process a photo, extract Greek text, and return a translation."""
+        """Process a photo, combine caption instructions, and reply with analysis plus translation."""
         message = update.message
         if not message or not message.photo:
             return
@@ -675,6 +861,10 @@ class GreekTeacherAgent:
         chat = update.effective_chat
         if chat is None:
             return
+
+        self._pending_flashcard_terms.pop(chat.id, None)
+
+        caption_text = (message.caption or "").strip()
 
         user = update.effective_user
         if user is not None:
@@ -708,25 +898,72 @@ class GreekTeacherAgent:
 
         if recognition_failed:
             reply_text = "Не получилось распознать текст на этом фото. Попробуй ещё раз немного позже."
+            history_entry = self._build_photo_history_entry(caption_text, None)
             await message.reply_text(reply_text)
-            self._record_interaction(chat.id, "[Фото]", reply_text)
+            self._record_interaction(chat.id, history_entry, reply_text)
             await self._increment_user_stats(chat.id, questions=1)
             return
 
         if result is None:
             reply_text = "Похоже, на фото нет греческого текста. Пришли изображение, где текст именно на греческом."
+            history_entry = self._build_photo_history_entry(caption_text, None)
             await message.reply_text(reply_text)
-            self._record_interaction(chat.id, "[Фото]", reply_text)
+            self._record_interaction(chat.id, history_entry, reply_text)
             await self._increment_user_stats(chat.id, questions=1)
             return
 
-        reply_text = self._format_image_result_message(result)
+        assistant_reply = ""
+        caption_notice: Optional[str] = None
+        conversation_prompt: Optional[str] = None
+
+        if caption_text:
+            conversation_prompt = self._build_photo_prompt(caption_text, result)
+            caption_task = asyncio.create_task(self._typing_indicator(chat.id, context))
+            try:
+                assistant_reply = await self._generate_response(chat.id, conversation_prompt)
+            except Exception:  # pragma: no cover - network issues
+                LOGGER.exception("Failed to generate caption-aware response for chat %s.", chat.id)
+                caption_notice = "Не удалось обработать запрос из подписи, но перевод текста приведён выше."
+            finally:
+                caption_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await caption_task
+
+        if assistant_reply:
+            assistant_reply = self._strip_add_card_prompts(assistant_reply).strip()
+
+        selected_words, missing_words, words_checked = await self._analyze_image_words(chat.id, result)
+        flashcard_section = self._format_image_flashcard_section(selected_words, missing_words, words_checked)
+
+        reply_sections: List[str] = [self._format_image_result_message(result)]
+        if assistant_reply:
+            reply_sections.append("<b>Ответ на запрос:</b>\n" + self._escape_html(assistant_reply))
+        if caption_notice:
+            reply_sections.append(self._escape_html(caption_notice))
+        if flashcard_section:
+            reply_sections.append(flashcard_section)
+
+        reply_text = "\n\n".join(section for section in reply_sections if section).strip()
+
+        reply_markup = self._build_take_card_markup()
+        if words_checked and missing_words:
+            pending_terms = [greek.strip() for greek, _ in missing_words if greek.strip()]
+            if pending_terms:
+                self._pending_flashcard_terms[chat.id] = pending_terms
+                reply_markup = self._build_add_card_markup()
+            else:
+                self._pending_flashcard_terms.pop(chat.id, None)
+        else:
+            self._pending_flashcard_terms.pop(chat.id, None)
+
         await message.reply_text(
             reply_text,
             parse_mode=ParseMode.HTML,
-            reply_markup=self._build_take_card_markup(),
+            reply_markup=reply_markup,
         )
-        self._record_interaction(chat.id, "[Фото]", reply_text)
+
+        history_message = conversation_prompt or self._build_photo_history_entry(caption_text, result)
+        self._record_interaction(chat.id, history_message, reply_text)
         await self._increment_user_stats(chat.id, questions=1)
 
     async def handle_start(
@@ -1139,9 +1376,19 @@ class GreekTeacherAgent:
             return
 
         chat_id = message.chat.id
-        pending_term = self._pending_flashcard_terms.get(chat_id)
-        if not pending_term:
+        pending_terms = self._pending_flashcard_terms.get(chat_id)
+        if not pending_terms:
             await query.answer("Не нашёл подходящее слово для добавления.", show_alert=True)
+            return
+
+        terms = [
+            term.strip()
+            for term in pending_terms
+            if isinstance(term, str) and term.strip()
+        ]
+        if not terms:
+            self._pending_flashcard_terms.pop(chat_id, None)
+            await query.answer("Подходящие слова не найдены.", show_alert=True)
             return
 
         await query.answer()
@@ -1150,8 +1397,9 @@ class GreekTeacherAgent:
         with suppress(Exception):
             await query.edit_message_reply_markup(reply_markup=None)
 
-        synthetic_message = f"Добавь в карточки {pending_term}"
-        await self._maybe_handle_flashcard_request(message, chat_id, synthetic_message)
+        for term in terms:
+            synthetic_message = f"Создай карточки для слова '{term}'."
+            await self._maybe_handle_flashcard_request(message, chat_id, synthetic_message)
 
     @staticmethod
     def _build_reveal_keyboard(user_flashcard_id: int, orientation: str) -> InlineKeyboardMarkup:
