@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple, Union
+from typing import Deque, Dict, List, Optional, Set, Tuple, Union
 
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -121,6 +121,8 @@ class GreekTeacherAgent:
             )
         self._common_words_path = Path(__file__).resolve().parents[2] / "static" / "greek_top_500_words.csv"
         self._common_words_cache: Optional[List[FlashcardPayload]] = None
+        self._common_words_lookup: Optional[Set[str]] = None
+        self._article_lookup: Set[str] = {self._normalize_greek_term(article) for article in _GREEK_ARTICLE_PREFIXES}
         self._pending_flashcard_terms: Dict[int, Union[str, List[str]]] = {}
 
     def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
@@ -174,6 +176,11 @@ class GreekTeacherAgent:
             raise RuntimeError("Failed to load common words CSV file.") from exc
 
         self._common_words_cache = entries
+        self._common_words_lookup = {
+            self._normalize_greek_term(payload.source_text)
+            for payload in entries
+            if payload.source_text
+        }
         return entries
     
     @staticmethod
@@ -215,6 +222,42 @@ class GreekTeacherAgent:
         if not text:
             return []
         return [match.group(0).strip() for match in _GREEK_SEQUENCE_RE.finditer(text)]
+
+    def _is_probable_proper_noun(self, term: str, common_lookup: Set[str]) -> bool:
+        stripped = (term or "").strip()
+        if not stripped:
+            return False
+
+        first_char = stripped[0]
+        if not first_char.isalpha() or not first_char.isupper():
+            return False
+
+        normalized = self._normalize_greek_term(stripped)
+        if not normalized:
+            return False
+
+        if normalized in self._article_lookup:
+            return False
+
+        if normalized in common_lookup:
+            return False
+
+        return True
+
+    def _get_common_word_lookup(self) -> Set[str]:
+        if self._common_words_lookup is None:
+            try:
+                entries = self._load_common_flashcards()
+            except Exception:  # pragma: no cover - defensive fallback
+                LOGGER.debug("Failed to load common words lookup.", exc_info=True)
+                self._common_words_lookup = set()
+            else:
+                self._common_words_lookup = {
+                    self._normalize_greek_term(entry.source_text)
+                    for entry in entries
+                    if entry.source_text
+                }
+        return self._common_words_lookup
 
     def _select_primary_term(self, candidates: List[str]) -> Optional[str]:
         for term in candidates:
@@ -581,9 +624,12 @@ class GreekTeacherAgent:
         """Return unique Greek words extracted from OCR, preserving order."""
         unique: List[Tuple[str, str]] = []
         seen: set[str] = set()
+        common_lookup = self._get_common_word_lookup()
         for greek_word, translation_word in result.words:
             normalized = self._normalize_greek_term(greek_word)
             if not normalized or normalized in seen:
+                continue
+            if self._is_probable_proper_noun(greek_word, common_lookup):
                 continue
             seen.add(normalized)
             greek_clean = greek_word.strip()
@@ -937,7 +983,7 @@ class GreekTeacherAgent:
 
         reply_sections: List[str] = [self._format_image_result_message(result)]
         if assistant_reply:
-            reply_sections.append("<b>Ответ на запрос:</b>\n" + self._escape_html(assistant_reply))
+            reply_sections.append("<b>Ответ на запрос:</b>\n" + self._convert_markdown_to_html(assistant_reply))
         if caption_notice:
             reply_sections.append(self._escape_html(caption_notice))
         if flashcard_section:
@@ -1704,6 +1750,26 @@ class GreekTeacherAgent:
         if not text:
             return ''
         return escape(text, quote=False)
+
+    @staticmethod
+    def _convert_markdown_to_html(text: Optional[str]) -> str:
+        """Convert minimal Markdown (bold/italic) to HTML while escaping other tags."""
+        if not text:
+            return ''
+
+        escaped = GreekTeacherAgent._escape_html(text).replace("\r\n", "\n")
+
+        def _replace(pattern: str, replacement: str, source: str) -> str:
+            return re.sub(pattern, replacement, source, flags=re.DOTALL)
+
+        # Bold (strong) **text** or __text__
+        escaped = _replace(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+        escaped = _replace(r"__(.+?)__", r"<b>\1</b>", escaped)
+        # Italic *text* or _text_
+        escaped = _replace(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
+        escaped = _replace(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", escaped)
+
+        return escaped
 
     def _format_flashcard_question(
         self,
