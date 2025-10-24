@@ -9,6 +9,7 @@ import imghdr
 import json
 import logging
 import random
+import re
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
@@ -38,6 +39,7 @@ from src.db.flashcards import (
     ensure_user_flashcard,
     get_next_flashcard_for_user,
     get_or_create_flashcard,
+    get_user_flashcard_by_source_text,
     record_flashcard_review,
 )
 from src.db.users import (
@@ -49,6 +51,8 @@ from src.db.users import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+_GREEK_SEQUENCE_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]+(?:[\s\-][\u0370-\u03ff\u1f00-\u1fff]+)*")
 
 
 @dataclass(slots=True)
@@ -103,6 +107,7 @@ class GreekTeacherAgent:
             )
         self._common_words_path = Path(__file__).resolve().parents[2] / "static" / "greek_top_500_words.csv"
         self._common_words_cache: Optional[List[FlashcardPayload]] = None
+        self._pending_flashcard_terms: Dict[int, str] = {}
 
     def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
         """Return the rolling history buffer for a chat, creating it when needed."""
@@ -156,6 +161,138 @@ class GreekTeacherAgent:
 
         self._common_words_cache = entries
         return entries
+    
+    @staticmethod
+    def _normalize_greek_term(term: str) -> str:
+        cleaned = "".join(ch for ch in term.casefold() if ch.isalnum() or ch.isspace())
+        return " ".join(cleaned.split())
+
+    @staticmethod
+    def _extract_greek_segments(text: Optional[str]) -> List[str]:
+        if not text:
+            return []
+        return [match.group(0).strip() for match in _GREEK_SEQUENCE_RE.finditer(text)]
+
+    def _select_primary_term(self, candidates: List[str]) -> Optional[str]:
+        for term in candidates:
+            normalized = self._normalize_greek_term(term)
+            if not normalized:
+                continue
+            if len(normalized.split()) <= 3:
+                return term.strip()
+        for term in candidates:
+            normalized = self._normalize_greek_term(term)
+            if normalized:
+                return term.strip()
+        return None
+
+    def _extract_primary_translation_term(self, user_message: str, assistant_reply: str) -> Optional[str]:
+        message_terms = self._extract_greek_segments(user_message)
+        normalized_lookup: Dict[str, str] = {}
+        for term in message_terms:
+            normalized = self._normalize_greek_term(term)
+            if not normalized or normalized in normalized_lookup:
+                continue
+            normalized_lookup[normalized] = term.strip()
+        if len(normalized_lookup) == 1:
+            return next(iter(normalized_lookup.values()))
+
+        if assistant_reply:
+            for line in assistant_reply.splitlines():
+                lowered = line.casefold()
+                if "пример" in lowered:
+                    continue
+                if "произнош" in lowered:
+                    continue
+                if "по-гречески" in lowered or "греч." in lowered:
+                    terms = self._extract_greek_segments(line)
+                    primary = self._select_primary_term(terms)
+                    if primary:
+                        return primary
+
+            dash_match = re.search(
+                r"[—:-]\s*([\u0370-\u03ff\u1f00-\u1fff][\u0370-\u03ff\u1f00-\u1fff\s\-]*)",
+                assistant_reply,
+            )
+            if dash_match:
+                snippet = dash_match.group(1)
+                terms = self._extract_greek_segments(snippet)
+                primary = self._select_primary_term(terms)
+                if primary:
+                    return primary
+
+            terms = self._extract_greek_segments(assistant_reply)
+            primary = self._select_primary_term(terms)
+            if primary:
+                return primary
+
+        return None
+
+    async def _user_has_active_flashcard(self, chat_id: int, source_text: str) -> bool:
+        if self._session_factory is None:
+            return False
+
+        try:
+            async with self._session_factory() as session:
+                record = await get_user_flashcard_by_source_text(
+                    session,
+                    chat_id,
+                    source_text,
+                    self._flashcard_source_language,
+                )
+        except Exception:
+            LOGGER.exception("Failed to check existing flashcards for chat %s.", chat_id)
+            return True
+
+        if record is None:
+            return False
+        return bool(record.is_active)
+
+    async def _resolve_reply_markup(
+        self,
+        chat_id: int,
+        user_message: str,
+        assistant_reply: str,
+    ) -> Tuple[InlineKeyboardMarkup, Optional[str]]:
+        if self._flashcard_workflow is None or self._session_factory is None:
+            self._pending_flashcard_terms.pop(chat_id, None)
+            return self._build_take_card_markup(), None
+
+        primary_term = self._extract_primary_translation_term(user_message, assistant_reply)
+        if not primary_term:
+            self._pending_flashcard_terms.pop(chat_id, None)
+            return self._build_take_card_markup(), None
+
+        if await self._user_has_active_flashcard(chat_id, primary_term):
+            self._pending_flashcard_terms.pop(chat_id, None)
+            notice = "Это слово уже есть в твоих карточках — потренируйся, чтобы закрепить значение!"
+            return self._build_take_card_markup(), notice
+
+        self._pending_flashcard_terms[chat_id] = primary_term
+        return self._build_add_card_markup(), None
+
+    @staticmethod
+    def _strip_add_card_prompts(reply: str) -> str:
+        if not reply:
+            return reply
+
+        removal_keywords = ("добав", "созд", "сохран", "занес", "перенес", "flashcard")
+        filtered_lines: List[str] = []
+        previous_blank = False
+        for raw_line in reply.splitlines():
+            lowered = raw_line.casefold()
+            if ("карточ" in lowered and any(keyword in lowered for keyword in removal_keywords)) or "добав" in lowered:
+                continue
+            if not raw_line.strip():
+                if previous_blank:
+                    continue
+                previous_blank = True
+            else:
+                previous_blank = False
+            filtered_lines.append(raw_line)
+
+        cleaned = "\n".join(filtered_lines).strip()
+        return cleaned
 
     async def _download_photo_bytes(
         self,
@@ -475,6 +612,8 @@ class GreekTeacherAgent:
         if chat is None:
             return
 
+        self._pending_flashcard_terms.pop(chat.id, None)
+
         user_message = update.message.text.strip()
         if not user_message:
             return
@@ -487,7 +626,7 @@ class GreekTeacherAgent:
                 getattr(user, "last_name", None),
             )
 
-        flashcard_result = await self._maybe_handle_flashcard_request(update, chat.id, user_message)
+        flashcard_result = await self._maybe_handle_flashcard_request(update.message, chat.id, user_message)
         if flashcard_result and flashcard_result.handled:
             return
 
@@ -506,10 +645,23 @@ class GreekTeacherAgent:
                     await typing_task
 
         if reply:
+            reply = self._strip_add_card_prompts(reply)
+            markup, notice = await self._resolve_reply_markup(chat.id, user_message, reply)
+            if notice:
+                if reply:
+                    reply = f"{reply}\n\n{notice}"
+                else:
+                    reply = notice
+            elif chat.id in self._pending_flashcard_terms:
+                invitation = "Если хотите, можете добавить это слово в свои карточки — нажмите кнопку ниже."
+                if reply:
+                    reply = f"{reply}\n\n{invitation}"
+                else:
+                    reply = invitation
             await update.message.reply_text(
                 reply,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=self._build_take_card_markup(),
+                reply_markup=markup,
             )
             self._record_interaction(chat.id, user_message, reply)
             await self._increment_user_stats(chat.id, questions=1)
@@ -775,11 +927,11 @@ class GreekTeacherAgent:
 
     async def _maybe_handle_flashcard_request(
         self,
-        update: Update,
+        message: Optional[Message],
         chat_id: int,
         user_message: str,
     ) -> Optional[FlashcardWorkflowResult]:
-        if not update.message:
+        if message is None:
             return None
 
         if self._flashcard_workflow is None:
@@ -789,7 +941,7 @@ class GreekTeacherAgent:
         progress_message = None
         if self._flashcard_workflow.is_probable_request(user_message):
             with suppress(Exception):
-                progress_message = await update.message.reply_text("Готовлю карточки...")
+                progress_message = await message.reply_text("Готовлю карточки...")
 
         result = await self._flashcard_workflow.handle(
             chat_id,
@@ -842,7 +994,7 @@ class GreekTeacherAgent:
                         await progress_message.delete()
                     progress_message = None
 
-            await update.message.reply_text(
+            await message.reply_text(
                 text,
                 parse_mode=parse_mode,
                 reply_markup=markup,
@@ -857,7 +1009,7 @@ class GreekTeacherAgent:
                     markup=self._build_flashcard_added_markup(summary.user_flashcard_id),
                 )
 
-            await update.message.reply_text(
+            await message.reply_text(
                 "Когда будешь готов потренироваться, нажми «Взять карточку».",
                 reply_markup=self._build_take_card_markup(),
             )
@@ -965,6 +1117,41 @@ class GreekTeacherAgent:
         return InlineKeyboardMarkup(
             [[InlineKeyboardButton("Взять карточку", callback_data="fc_take")]]
         )
+
+    @staticmethod
+    def _build_add_card_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Добавить в карточки", callback_data="fc_add")]]
+        )
+
+    async def handle_add_flashcard(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+
+        message = query.message
+        if message is None or message.chat is None:
+            await query.answer()
+            return
+
+        chat_id = message.chat.id
+        pending_term = self._pending_flashcard_terms.get(chat_id)
+        if not pending_term:
+            await query.answer("Не нашёл подходящее слово для добавления.", show_alert=True)
+            return
+
+        await query.answer()
+        self._pending_flashcard_terms.pop(chat_id, None)
+
+        with suppress(Exception):
+            await query.edit_message_reply_markup(reply_markup=None)
+
+        synthetic_message = f"Добавь в карточки {pending_term}"
+        await self._maybe_handle_flashcard_request(message, chat_id, synthetic_message)
 
     @staticmethod
     def _build_reveal_keyboard(user_flashcard_id: int, orientation: str) -> InlineKeyboardMarkup:
