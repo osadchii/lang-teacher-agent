@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -35,6 +36,64 @@ _TRIGGER_KEYWORDS = (
     "повтори",
     "закрепи",
 )
+
+_MULTIPLE_REQUEST_TOKENS = {
+    "все",
+    "всё",
+    "всю",
+    "всех",
+    "всем",
+    "всеми",
+    "оба",
+    "обе",
+    "обоих",
+    "обеих",
+    "каждый",
+    "каждая",
+    "каждое",
+    "каждую",
+    "каждой",
+    "каждые",
+    "каждого",
+    "каждому",
+    "каждым",
+    "каждых",
+    "несколько",
+    "вариант",
+    "варианта",
+    "варианты",
+    "вариантов",
+    "вариантами",
+    "форма",
+    "формы",
+    "форм",
+    "форму",
+    "формой",
+    "формам",
+    "формами",
+    "род",
+    "рода",
+    "родов",
+    "родами",
+    "время",
+    "времени",
+    "времена",
+    "времён",
+    "all",
+    "both",
+    "every",
+    "each",
+    "several",
+    "variants",
+    "variant",
+    "forms",
+    "genders",
+    "tenses",
+}
+
+_MULTIPLE_REQUEST_PREFIXES = ("кажд", "несколь")
+
+_GREEK_TOKEN_RE = re.compile(r"^[\u0370-\u03ff\u1f00-\u1fff\-]+$")
 
 
 @dataclass(slots=True)
@@ -161,6 +220,62 @@ class FlashcardWorkflow:
             return False
         return any(keyword in normalized for keyword in _TRIGGER_KEYWORDS)
 
+    @staticmethod
+    def _normalize_term(value: str) -> str:
+        cleaned = "".join(ch for ch in value.casefold() if ch.isalnum() or ch.isspace())
+        return " ".join(cleaned.split())
+
+    def _extract_greek_terms(self, message: str) -> List[str]:
+        terms: List[str] = []
+        current: List[str] = []
+        for raw_token in message.split():
+            token = raw_token.strip("«»\"'“”„()[]{}.,;:!?—-")
+            if not token:
+                if current:
+                    terms.append(" ".join(current))
+                    current = []
+                continue
+
+            if _GREEK_TOKEN_RE.fullmatch(token):
+                current.append(token)
+                continue
+
+            if current:
+                terms.append(" ".join(current))
+                current = []
+
+        if current:
+            terms.append(" ".join(current))
+
+        return terms
+
+    def _user_requested_multiple_cards(self, message: str, greek_terms: List[str]) -> bool:
+        if len(greek_terms) > 1:
+            return True
+
+        normalized = message.casefold()
+        tokens = [token for token in re.split(r"[\s,;:/\\]+", normalized) if token]
+
+        for token in tokens:
+            if token in _MULTIPLE_REQUEST_TOKENS:
+                return True
+            if any(token.startswith(prefix) for prefix in _MULTIPLE_REQUEST_PREFIXES):
+                return True
+
+        if any(ch.isdigit() and ch != "1" for ch in normalized):
+            return True
+
+        return False
+
+    def _matches_requested_term(self, source_text: str, normalized_terms: List[str]) -> bool:
+        normalized_source = self._normalize_term(source_text)
+        for term in normalized_terms:
+            if not term:
+                continue
+            if term in normalized_source or normalized_source in term:
+                return True
+        return False
+
     async def handle(
         self,
         chat_id: int,
@@ -173,6 +288,9 @@ class FlashcardWorkflow:
 
         if not self._looks_like_flashcard_request(message):
             return FlashcardWorkflowResult(False, [], [])
+
+        greek_terms = self._extract_greek_terms(message)
+        allow_multiple = self._user_requested_multiple_cards(message, greek_terms)
 
         try:
             extraction_message = self._combine_message_and_context(message, context)
@@ -193,11 +311,32 @@ class FlashcardWorkflow:
                 reason=extraction.reason,
             )
 
+        cards_to_process: List[GeneratedFlashcard] = extraction.flashcards
+
+        if greek_terms:
+            normalized_terms = [self._normalize_term(term) for term in greek_terms if term]
+            filtered_cards = [
+                card
+                for card in cards_to_process
+                if self._matches_requested_term(card.source_text, normalized_terms)
+            ]
+            if filtered_cards:
+                cards_to_process = filtered_cards
+
+        cards_to_process = cards_to_process[: self._max_cards_per_message]
+
+        if not allow_multiple and len(cards_to_process) > 1:
+            LOGGER.debug(
+                "Limiting flashcard additions to a single term for message '%s'.",
+                message,
+            )
+            cards_to_process = cards_to_process[:1]
+
         summaries: List[FlashcardSummary] = []
 
         async with self._session_factory() as session:
             async with session.begin():
-                for card in extraction.flashcards[: self._max_cards_per_message]:
+                for card in cards_to_process:
                     summary = await self._store_flashcard(session, chat_id, card)
                     if summary:
                         summaries.append(summary)

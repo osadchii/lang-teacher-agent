@@ -41,6 +41,32 @@ FLASHCARD_JSON = """
 }
 """
 
+MULTI_FLASHCARD_JSON = """
+{
+  "should_add": true,
+  "flashcards": [
+    {
+      "source_text": "ὁ ἀριστεύων",
+      "target_text": "прекраснейший",
+      "example": "ὁ ἀριστεύων ἀνήρ.",
+      "example_translation": "Самый прекрасный мужчина."
+    },
+    {
+      "source_text": "υπέροχος",
+      "target_text": "прекрасный",
+      "example": "Είναι υπέροχος φίλος.",
+      "example_translation": "Он прекрасный друг."
+    },
+    {
+      "source_text": "ὁ υπέρτατος",
+      "target_text": "самый лучший",
+      "example": "ὁ υπέρτατος στόχος μας.",
+      "example_translation": "Наша высшая цель."
+    }
+  ]
+}
+"""
+
 
 @pytest.mark.asyncio
 async def test_workflow_persists_and_reuses_flashcards(session_factory) -> None:
@@ -90,6 +116,104 @@ async def test_workflow_skips_irrelevant_messages(session_factory) -> None:
 
     assert result.handled is False
     assert client.responses.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_workflow_limits_to_primary_flashcard_when_request_is_generic(session_factory) -> None:
+    client = _StubClient(MULTI_FLASHCARD_JSON)
+    workflow = FlashcardWorkflow(
+        client=client,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    result = await workflow.handle(201, "добавь в карточки")
+
+    assert result.handled is True
+    assert len(result.summaries) == 1
+    assert result.summaries[0].source_text == "ὁ ἀριστεύων"
+
+    from src.db import UserFlashcard  # type: ignore import-cycle
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    async with session_factory() as session:
+        stmt = select(UserFlashcard).options(selectinload(UserFlashcard.flashcard)).where(
+            UserFlashcard.chat_id == 201
+        )
+        stored = await session.execute(stmt)
+        cards = stored.scalars().all()
+        assert len(cards) == 1
+        assert cards[0].flashcard.source_text == "ὁ ἀριστεύων"
+
+
+@pytest.mark.asyncio
+async def test_workflow_keeps_multiple_when_terms_are_listed(session_factory) -> None:
+    client = _StubClient(MULTI_FLASHCARD_JSON)
+    workflow = FlashcardWorkflow(
+        client=client,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    message = "добавь ὁ ἀριστεύων и υπέροχος"
+    result = await workflow.handle(202, message)
+
+    assert result.handled is True
+    assert len(result.summaries) == 2
+    sources = {summary.source_text for summary in result.summaries}
+    assert sources == {"ὁ ἀριστεύων", "υπέροχος"}
+
+    from src.db import UserFlashcard  # type: ignore import-cycle
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    async with session_factory() as session:
+        stmt = select(UserFlashcard).options(selectinload(UserFlashcard.flashcard)).where(
+            UserFlashcard.chat_id == 202
+        )
+        stored = await session.execute(stmt)
+        cards = stored.scalars().all()
+        assert len(cards) == 2
+        assert {card.flashcard.source_text for card in cards} == {"ὁ ἀριστεύων", "υπέροχος"}
+
+
+@pytest.mark.asyncio
+async def test_workflow_keeps_multiple_when_user_requests_all_variants(session_factory) -> None:
+    client = _StubClient(MULTI_FLASHCARD_JSON)
+    workflow = FlashcardWorkflow(
+        client=client,
+        model="test-model",
+        session_factory=session_factory,
+        source_language="Greek",
+        target_language="Russian",
+    )
+
+    result = await workflow.handle(203, "добавь все варианты в карточки")
+
+    assert result.handled is True
+    assert len(result.summaries) == 3
+
+    from src.db import UserFlashcard  # type: ignore import-cycle
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    async with session_factory() as session:
+        stmt = select(UserFlashcard).options(selectinload(UserFlashcard.flashcard)).where(
+            UserFlashcard.chat_id == 203
+        )
+        stored = await session.execute(stmt)
+        cards = stored.scalars().all()
+        assert len(cards) == 3
+        assert {card.flashcard.source_text for card in cards} == {
+            "ὁ ἀριστεύων",
+            "υπέροχος",
+            "ὁ υπέρτατος",
+        }
 
 
 
