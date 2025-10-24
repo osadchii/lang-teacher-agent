@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple, Union
 
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -121,7 +121,7 @@ class GreekTeacherAgent:
             )
         self._common_words_path = Path(__file__).resolve().parents[2] / "static" / "greek_top_500_words.csv"
         self._common_words_cache: Optional[List[FlashcardPayload]] = None
-        self._pending_flashcard_terms: Dict[int, List[str]] = {}
+        self._pending_flashcard_terms: Dict[int, Union[str, List[str]]] = {}
 
     def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
         """Return the rolling history buffer for a chat, creating it when needed."""
@@ -318,7 +318,7 @@ class GreekTeacherAgent:
             notice = "Это слово уже есть в твоих карточках — потренируйся, чтобы закрепить значение!"
             return self._build_take_card_markup(), notice
 
-        self._pending_flashcard_terms[chat_id] = [primary_term]
+        self._pending_flashcard_terms[chat_id] = primary_term
         return self._build_add_card_markup(), None
 
     @staticmethod
@@ -1381,11 +1381,14 @@ class GreekTeacherAgent:
             await query.answer("Не нашёл подходящее слово для добавления.", show_alert=True)
             return
 
-        terms = [
-            term.strip()
-            for term in pending_terms
-            if isinstance(term, str) and term.strip()
-        ]
+        if isinstance(pending_terms, str):
+            terms = [pending_terms.strip()] if pending_terms.strip() else []
+        else:
+            terms = [
+                term.strip()
+                for term in pending_terms
+                if isinstance(term, str) and term.strip()
+            ]
         if not terms:
             self._pending_flashcard_terms.pop(chat_id, None)
             await query.answer("Подходящие слова не найдены.", show_alert=True)
@@ -1398,7 +1401,7 @@ class GreekTeacherAgent:
             await query.edit_message_reply_markup(reply_markup=None)
 
         for term in terms:
-            synthetic_message = f"Создай карточки для слова '{term}'."
+            synthetic_message = f"Добавь в карточки {term}"
             await self._maybe_handle_flashcard_request(message, chat_id, synthetic_message)
 
     @staticmethod
