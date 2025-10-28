@@ -24,9 +24,9 @@ def test_history_is_trimmed_to_last_five_pairs() -> None:
     chat_id = 101
 
     for index in range(6):
-        agent._record_interaction(chat_id, f"user {index}", f"assistant {index}")
+        agent._history.record(chat_id, f"user {index}", f"assistant {index}")
 
-    messages = agent._build_messages(chat_id, "latest question")
+    messages = agent._history.build_messages(agent._system_prompt, chat_id, "latest question")
 
     assert messages[0] == {"role": "system", "content": SYSTEM_PROMPT}
     expected_pairs = [(f"user {i}", f"assistant {i}") for i in range(1, 6)]
@@ -44,11 +44,11 @@ def test_histories_are_isolated_by_chat_id() -> None:
     first_chat = 1
     second_chat = 2
 
-    agent._record_interaction(first_chat, "user first", "assistant first")
-    agent._record_interaction(second_chat, "user second", "assistant second")
+    agent._history.record(first_chat, "user first", "assistant first")
+    agent._history.record(second_chat, "user second", "assistant second")
 
-    first_messages = agent._build_messages(first_chat, "follow up")
-    second_messages = agent._build_messages(second_chat, "new question")
+    first_messages = agent._history.build_messages(agent._system_prompt, first_chat, "follow up")
+    second_messages = agent._history.build_messages(agent._system_prompt, second_chat, "new question")
 
     assert {message["content"] for message in first_messages if message["role"] == "assistant"} == {
         "assistant first"
@@ -62,13 +62,13 @@ def test_flashcard_context_uses_last_exchange() -> None:
     agent = _build_agent()
     chat_id = 303
 
-    agent._record_interaction(
+    agent._history.record(
         chat_id,
         "Как будет «больница»?",
         "По-гречески «больница» — το νοσοκομείο (to nosokomío).",
     )
 
-    context = agent._build_flashcard_context(chat_id)
+    context = agent._history.build_flashcard_context(chat_id)
 
     assert context is not None
     assert "Как будет «больница»?" in context

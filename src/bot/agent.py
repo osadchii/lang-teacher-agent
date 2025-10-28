@@ -10,14 +10,13 @@ import json
 import logging
 import random
 import re
-from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -31,6 +30,7 @@ from src.bot.flashcard_workflow import (
     FlashcardWorkflow,
     FlashcardWorkflowResult,
 )
+from src.bot.message_history import MessageHistoryService
 from src.bot.openai_utils import extract_output_text
 from src.bot.srs import calculate_next_schedule
 from src.db import UserFlashcard
@@ -102,8 +102,7 @@ class GreekTeacherAgent:
         self._model = model
         self._vision_model = vision_model or model
         self._system_prompt = system_prompt
-        self._history_size = history_size
-        self._history: Dict[int, Deque[Tuple[str, str]]] = {}
+        self._history = MessageHistoryService(history_size)
         self._session_factory = session_factory
         self._flashcard_source_language = flashcard_source_language
         self._flashcard_target_language = flashcard_target_language
@@ -124,19 +123,6 @@ class GreekTeacherAgent:
         self._common_words_lookup: Optional[Set[str]] = None
         self._article_lookup: Set[str] = {self._normalize_greek_term(article) for article in _GREEK_ARTICLE_PREFIXES}
         self._pending_flashcard_terms: Dict[int, Union[str, List[str]]] = {}
-
-    def _get_history(self, chat_id: int) -> Deque[Tuple[str, str]]:
-        """Return the rolling history buffer for a chat, creating it when needed."""
-        history = self._history.get(chat_id)
-        if history is None:
-            history = deque(maxlen=self._history_size)
-            self._history[chat_id] = history
-        return history
-
-    def _record_interaction(self, chat_id: int, user_message: str, assistant_reply: str) -> None:
-        """Persist the most recent user/assistant exchange for the chat."""
-        history = self._get_history(chat_id)
-        history.append((user_message, assistant_reply))
 
     def _load_common_flashcards(self) -> List[FlashcardPayload]:
         """Load and cache flashcard payloads for the 500 most common words."""
@@ -600,26 +586,6 @@ class GreekTeacherAgent:
         )
         return "\n".join(lines).strip()
 
-    def _build_photo_history_entry(
-        self,
-        caption: Optional[str],
-        result: Optional[ImageTextResult],
-    ) -> str:
-        """Compose a history entry describing the processed photo."""
-        lines: List[str] = ["[Фото]"]
-        caption_text = (caption or "").strip()
-        if caption_text:
-            lines.append(f"Подпись: {caption_text}")
-
-        if result is not None:
-            lines.append("Распознанный текст:")
-            lines.append(result.greek_text.strip())
-            if result.translation:
-                lines.append("Перевод:")
-                lines.append(result.translation.strip())
-
-        return "\n".join(lines).strip()
-
     def _collect_unique_image_words(self, result: ImageTextResult) -> List[Tuple[str, str]]:
         """Return unique Greek words extracted from OCR, preserving order."""
         unique: List[Tuple[str, str]] = []
@@ -806,20 +772,11 @@ class GreekTeacherAgent:
             LOGGER.exception("Failed to load statistics for chat %s.", chat_id)
             return None
 
-    def _build_messages(self, chat_id: int, user_message: str) -> List[Dict[str, str]]:
-        """Compose the conversation context to send to the OpenAI Responses API."""
-        messages: List[Dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
-        for previous_user_message, previous_reply in self._get_history(chat_id):
-            messages.append({"role": "user", "content": previous_user_message})
-            messages.append({"role": "assistant", "content": previous_reply})
-        messages.append({"role": "user", "content": user_message})
-        return messages
-
     async def _generate_response(self, chat_id: int, user_message: str) -> str:
         """Call the OpenAI Responses API and return plain text."""
         response = await self._client.responses.create(
             model=self._model,
-            input=self._build_messages(chat_id, user_message),
+            input=self._history.build_messages(self._system_prompt, chat_id, user_message),
         )
         return extract_output_text(response)
 
@@ -894,7 +851,7 @@ class GreekTeacherAgent:
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=markup,
             )
-            self._record_interaction(chat.id, user_message, reply)
+            self._history.record(chat.id, user_message, reply)
             await self._increment_user_stats(chat.id, questions=1)
 
 
@@ -944,17 +901,17 @@ class GreekTeacherAgent:
 
         if recognition_failed:
             reply_text = "Не получилось распознать текст на этом фото. Попробуй ещё раз немного позже."
-            history_entry = self._build_photo_history_entry(caption_text, None)
+            history_entry = self._history.build_photo_history_entry(caption_text, None)
             await message.reply_text(reply_text)
-            self._record_interaction(chat.id, history_entry, reply_text)
+            self._history.record(chat.id, history_entry, reply_text)
             await self._increment_user_stats(chat.id, questions=1)
             return
 
         if result is None:
             reply_text = "Похоже, на фото нет греческого текста. Пришли изображение, где текст именно на греческом."
-            history_entry = self._build_photo_history_entry(caption_text, None)
+            history_entry = self._history.build_photo_history_entry(caption_text, None)
             await message.reply_text(reply_text)
-            self._record_interaction(chat.id, history_entry, reply_text)
+            self._history.record(chat.id, history_entry, reply_text)
             await self._increment_user_stats(chat.id, questions=1)
             return
 
@@ -1008,8 +965,8 @@ class GreekTeacherAgent:
             reply_markup=reply_markup,
         )
 
-        history_message = conversation_prompt or self._build_photo_history_entry(caption_text, result)
-        self._record_interaction(chat.id, history_message, reply_text)
+        history_message = conversation_prompt or self._history.build_photo_history_entry(caption_text, result)
+        self._history.record(chat.id, history_message, reply_text)
         await self._increment_user_stats(chat.id, questions=1)
 
     async def handle_start(
@@ -1191,23 +1148,6 @@ class GreekTeacherAgent:
             reply_markup=self._build_take_card_markup(),
         )
 
-    def _build_flashcard_context(self, chat_id: int) -> Optional[str]:
-        """Return the most recent exchange to help flashcard extraction."""
-        history = self._get_history(chat_id)
-        if not history:
-            return None
-
-        previous_user, previous_reply = history[-1]
-        lines: List[str] = []
-        if previous_user:
-            lines.append(f"Предыдущее сообщение пользователя: {previous_user.strip()}")
-        if previous_reply:
-            lines.append(f"Ответ преподавателя: {previous_reply.strip()}")
-        if not lines:
-            return None
-        lines.append("Добавь подходящую лексику из этого ответа в карточки ученика.")
-        return "\n".join(lines)
-
     async def _maybe_handle_flashcard_request(
         self,
         message: Optional[Message],
@@ -1220,7 +1160,7 @@ class GreekTeacherAgent:
         if self._flashcard_workflow is None:
             return None
 
-        context_payload = self._build_flashcard_context(chat_id)
+        context_payload = self._history.build_flashcard_context(chat_id)
         progress_message = None
         if self._flashcard_workflow.is_probable_request(user_message):
             with suppress(Exception):
