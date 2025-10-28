@@ -6,7 +6,7 @@ Lang Teacher Agent is an AI tutor focused on helping learners practice Greek thr
 ## System Architecture
 - `src/main.py`: Thin entry point that loads environment-backed settings and delegates to the runtime bootstrap.
 - `src/app/`: Separates environment configuration (`settings.py`) from runtime wiring (`runtime.py`), including logging setup and migration execution.
-- `src/bot/`: Contains the `GreekTeacherAgent` Telegram handler, flashcard extraction workflow (`flashcard_workflow.py`), spaced-repetition scheduling helpers (`srs.py`), and the Telegram application factory.
+- `src/bot/`: Contains the `GreekTeacherAgent` Telegram handler, flashcard extraction workflow (`flashcard_workflow.py`), spaced-repetition scheduling helpers (`srs.py`), supporting components in `agent_components/` (image helpers live in `image_support.py`), and the Telegram application factory.
 - `src/services/`: Wraps external integrations, currently limited to the OpenAI client builder.
 - `src/db/`: Houses SQLAlchemy models, flashcard persistence helpers, session management, and helpers for running migrations during startup.
 - Telegram Bot API: Receives messages from learners and relays them to the OpenAI-backed tutor, which responds with tailored Greek language guidance.
@@ -18,7 +18,7 @@ Lang Teacher Agent is an AI tutor focused on helping learners practice Greek thr
 ## Directory Structure
 - `src/`: Application source code organised into focused packages.
 - `src/app/`: Configuration loading and runtime orchestration.
-- `src/bot/`: Telegram-facing agent logic, flashcard workflow, and application wiring.
+- `src/bot/`: Telegram-facing agent logic, flashcard workflow, application wiring, and extracted helper modules such as `agent_components/image_support.py` for image processing.
 - `src/db/`: Database models, session factory, flashcard helpers, and migration utilities.
 - `src/services/`: External service helpers (OpenAI client).
 - `tests/`: Pytest-based async test suite covering conversation memory, flashcard storage, workflow parsing, and SRS scheduling.

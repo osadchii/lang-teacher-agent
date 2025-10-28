@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import csv
-import imghdr
-import json
 import logging
 import random
 import re
 from contextlib import suppress
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
-from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union
 
@@ -25,6 +20,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
+from src.bot.agent_components.image_support import (
+    ImageTextResult,
+    analyze_image_words,
+    build_photo_prompt,
+    collect_unique_image_words,
+    download_photo_bytes,
+    extract_greek_text_from_image,
+    format_image_flashcard_section,
+    format_image_result_message,
+    select_image_words_for_review,
+)
 from src.bot.flashcard_workflow import (
     FlashcardSummary,
     FlashcardWorkflow,
@@ -67,19 +73,6 @@ _GREEK_ARTICLE_PREFIXES = (
     "του",
     "της",
 )
-
-
-@dataclass(slots=True)
-class ImageTextResult:
-    """Structured result for OCR + translation of Greek text found in images."""
-
-    greek_text: str
-    translation: str
-    words: List[Tuple[str, str]]
-
-    @property
-    def word_count(self) -> int:
-        return len(self.words)
 
 
 class GreekTeacherAgent:
@@ -373,312 +366,6 @@ class GreekTeacherAgent:
         cleaned = "\n".join(filtered_lines).strip()
         return cleaned
 
-    async def _download_photo_bytes(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        file_id: str,
-    ) -> bytes:
-        """Download a Telegram photo by file_id and return its raw bytes."""
-        telegram_file = await context.bot.get_file(file_id)
-        buffer = BytesIO()
-        await telegram_file.download_to_memory(out=buffer)
-        return buffer.getvalue()
-
-    async def _extract_greek_text_from_image(
-        self,
-        image_bytes: bytes,
-        chat_id: Optional[int] = None,
-    ) -> Optional[ImageTextResult]:
-        """Send an image to OpenAI and parse the detected Greek text plus translation."""
-        encoded_image = base64.b64encode(image_bytes).decode("ascii")
-        image_format = imghdr.what(None, image_bytes)
-        if image_format == "jpeg":
-            mime_type = "image/jpeg"
-        elif image_format == "png":
-            mime_type = "image/png"
-        elif image_format == "gif":
-            mime_type = "image/gif"
-        else:
-            mime_type = "image/jpeg"
-        data_url = f"data:{mime_type};base64,{encoded_image}"
-
-        try:
-            response = await self._client.responses.create(
-                model=self._vision_model,
-                input=[
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": (
-                                    "You extract Modern Greek text from images and translate it into Russian. "
-                                    "Always respond with strict JSON using the schema: "
-                                    '{"status": "ok" | "no_greek", "greek_text": string, "translation": string, '
-                                    '"words": [{"greek": string, "translation": string}]}. '
-                                    "Treat only characters from the Greek alphabet (including tonos) as Greek text. "
-                                    "If there is no Greek text, use status \"no_greek\" and leave other fields empty. "
-                                    "Limit the words list to at most 10 unique Greek words in the order they appear, "
-                                    "and provide their Russian translations when possible."
-                                ),
-                            }
-                        ],
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": "Найди весь греческий текст на изображении, выпиши его без изменений и переведи на русский.",
-                            },
-                            {"type": "input_image", "image_url": data_url},
-                        ],
-                    },
-                ],
-            )
-        except Exception as exc:  # pragma: no cover - network errors
-            LOGGER.exception("Failed OCR request%s.", f" for chat {chat_id}" if chat_id else "")
-            raise RuntimeError("Failed to request image recognition.") from exc
-
-        raw_text = extract_output_text(response).strip()
-        LOGGER.debug("OCR raw response%s: %s", f" for chat {chat_id}" if chat_id else "", raw_text[:500])
-        cleaned = self._strip_code_fences(raw_text)
-        try:
-            payload = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            LOGGER.warning("Malformed OCR response: %s", raw_text)
-            raise RuntimeError("Image recognition returned malformed data.") from exc
-
-        status = str(payload.get("status") or "").lower()
-        greek_text = (payload.get("greek_text") or "").strip()
-        translation = (payload.get("translation") or "").strip()
-
-        if not greek_text:
-            candidate = payload.get("text") or payload.get("raw_text")
-            if isinstance(candidate, str):
-                greek_text = candidate.strip()
-
-        if not greek_text:
-            lines_field = payload.get("lines")
-            if isinstance(lines_field, list):
-                collected: List[str] = []
-                for entry in lines_field:
-                    if isinstance(entry, str):
-                        stripped_entry = entry.strip()
-                        if stripped_entry and self._contains_greek_characters(stripped_entry):
-                            collected.append(stripped_entry)
-                if collected:
-                    greek_text = "\n".join(collected)
-
-        if status == "no_greek":
-            LOGGER.info(
-                "OCR reported no Greek text%s. keys=%s",
-                f" for chat {chat_id}" if chat_id else "",
-                list(payload.keys()),
-            )
-            return None
-
-        if not greek_text or not self._contains_greek_characters(greek_text):
-            LOGGER.info(
-                "OCR could not confirm Greek text%s. status=%s detected_text_preview=%r",
-                f" for chat {chat_id}" if chat_id else "",
-                status or "missing",
-                (greek_text or "")[:120],
-            )
-            return None
-
-        raw_words = payload.get("words") or []
-        words: List[Tuple[str, str]] = []
-        for entry in raw_words:
-            if not isinstance(entry, dict):
-                continue
-            greek_word = str(entry.get("greek") or "").strip()
-            translation_word = str(entry.get("translation") or "").strip()
-            if greek_word:
-                words.append((greek_word, translation_word))
-            if len(words) >= 10:
-                break
-
-        LOGGER.info(
-            "OCR success%s. status=%s greek_chars=%d translation_chars=%d words=%d",
-            f" for chat {chat_id}" if chat_id else "",
-            status or "missing",
-            len(greek_text),
-            len(translation),
-            len(words),
-        )
-
-        return ImageTextResult(
-            greek_text=greek_text,
-            translation=translation,
-            words=words,
-        )
-
-    @staticmethod
-    def _strip_code_fences(response_text: str) -> str:
-        """Remove optional Markdown fences around JSON responses."""
-        stripped = response_text.strip()
-        if stripped.startswith("```") and stripped.endswith("```"):
-            body = stripped.split("\n", 1)
-            if len(body) == 2:
-                content = body[1].rsplit("\n", 1)
-                if len(content) == 2:
-                    return content[0]
-        return stripped
-
-    @staticmethod
-    def _contains_greek_characters(text: str) -> bool:
-        """Check if the provided text includes any Greek alphabet characters."""
-        for char in text:
-            code_point = ord(char)
-            if 0x0370 <= code_point <= 0x03FF or 0x1F00 <= code_point <= 0x1FFF:
-                return True
-        return False
-
-    def _format_image_result_message(self, result: ImageTextResult) -> str:
-        """Compose an HTML response summarizing OCR findings and translation."""
-        lines: List[str] = [
-            "<b>Найденный греческий текст:</b>",
-            f"<pre>{self._escape_html(result.greek_text)}</pre>",
-            "<b>Перевод:</b>",
-            self._escape_html(result.translation or "Перевод нужно уточнить."),
-        ]
-
-        if result.words:
-            lines.append("")
-            lines.append("<b>Слова из текста:</b>")
-            for greek_word, russian_word in result.words:
-                if russian_word:
-                    lines.append(f"- {self._escape_html(greek_word)} - {self._escape_html(russian_word)}")
-                else:
-                    lines.append(f"- {self._escape_html(greek_word)} - перевод нужно уточнить")
-
-        if 0 < result.word_count <= 5:
-            lines.append("")
-            lines.append(
-                "Если хочешь, помогу добавить эти слова в карточки (до 10 за раз) — просто напиши."
-            )
-
-        return "\n".join(lines).strip()
-
-    def _build_photo_prompt(self, caption: str, result: ImageTextResult) -> str:
-        """Prepare a user message for LLM when a caption accompanies a photo."""
-        caption_text = caption.strip()
-        lines: List[str] = []
-        if caption_text:
-            lines.append(f"Пользователь прислал фотографию с подписью: {caption_text}")
-        else:
-            lines.append("Пользователь прислал фотографию с греческим текстом.")
-
-        lines.append("")
-        lines.append("Распознанный греческий текст с изображения:")
-        lines.append(result.greek_text.strip())
-
-        if result.translation:
-            lines.append("")
-            lines.append("Перевод распознанного текста на русский:")
-            lines.append(result.translation.strip())
-
-        lines.append("")
-        lines.append(
-            "Ответь на просьбу пользователя, используя этот материал. Если он просит проверить ошибки, "
-            "выполнить задание или ответить на вопрос, проанализируй греческий текст и объясни результат по-русски."
-        )
-        return "\n".join(lines).strip()
-
-    def _collect_unique_image_words(self, result: ImageTextResult) -> List[Tuple[str, str]]:
-        """Return unique Greek words extracted from OCR, preserving order."""
-        unique: List[Tuple[str, str]] = []
-        seen: set[str] = set()
-        common_lookup = self._get_common_word_lookup()
-        for greek_word, translation_word in result.words:
-            normalized = self._normalize_greek_term(greek_word)
-            if not normalized or normalized in seen:
-                continue
-            if self._is_probable_proper_noun(greek_word, common_lookup):
-                continue
-            seen.add(normalized)
-            greek_clean = greek_word.strip()
-            translation_clean = translation_word.strip() if translation_word else ""
-            unique.append((greek_clean, translation_clean))
-        return unique
-
-    def _select_image_words_for_review(self, result: ImageTextResult) -> List[Tuple[str, str]]:
-        """Select 1 or up to 3 key words from the OCR result depending on text length."""
-        unique_words = self._collect_unique_image_words(result)
-        if not unique_words:
-            return []
-
-        limit = 1 if len(unique_words) <= 5 else 3
-        return unique_words[:limit]
-
-    async def _analyze_image_words(
-        self,
-        chat_id: int,
-        result: ImageTextResult,
-    ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], bool]:
-        """
-        Classify highlighted words by whether they already exist in the user's flashcards.
-
-        Returns a tuple of (selected_words, missing_words, checked_flag).
-        """
-        selected_words = self._select_image_words_for_review(result)
-        if not selected_words:
-            return [], [], False
-
-        if self._session_factory is None:
-            return selected_words, [], False
-
-        if self._flashcard_workflow is None:
-            return selected_words, [], False
-
-        missing_words: List[Tuple[str, str]] = []
-        for greek_word, translation_word in selected_words:
-            if await self._user_has_active_flashcard(chat_id, greek_word):
-                continue
-            missing_words.append((greek_word, translation_word))
-
-        return selected_words, missing_words, True
-
-    def _format_image_flashcard_section(
-        self,
-        selected_words: List[Tuple[str, str]],
-        missing_words: List[Tuple[str, str]],
-        checked: bool,
-    ) -> Optional[str]:
-        """Format the section describing highlighted words and flashcard status."""
-        if not selected_words:
-            return None
-
-        lines: List[str] = ["<b>Ключевые слова:</b>"]
-        missing_lookup = {
-            self._normalize_greek_term(greek): translation for greek, translation in missing_words
-        } if checked else {}
-
-        for greek_word, translation_word in selected_words:
-            normalized = self._normalize_greek_term(greek_word)
-            if translation_word:
-                base_line = f"- {self._escape_html(greek_word)} - {self._escape_html(translation_word)}"
-            else:
-                base_line = f"- {self._escape_html(greek_word)}"
-
-            if checked:
-                if normalized in missing_lookup:
-                    base_line += " (нет в карточках)"
-                else:
-                    base_line += " (уже есть в карточках)"
-
-            lines.append(base_line)
-
-        if checked and missing_words:
-            lines.append("")
-            missing_list = ", ".join(self._escape_html(greek) for greek, _ in missing_words)
-            if missing_list:
-                lines.append(f"Предлагаю добавить: {missing_list}.")
-            lines.append("Отсутствующие слова можно добавить в карточки кнопкой ниже.")
-
-        return "\n".join(lines).strip()
-
     async def _ensure_common_flashcards(
         self,
         session: AsyncSession,
@@ -879,7 +566,7 @@ class GreekTeacherAgent:
 
         largest_photo = message.photo[-1]
         try:
-            image_bytes = await self._download_photo_bytes(context, largest_photo.file_id)
+            image_bytes = await download_photo_bytes(context.bot, largest_photo.file_id)
         except Exception:  # pragma: no cover - network errors
             LOGGER.exception("Failed to download photo for chat %s.", chat.id)
             await message.reply_text("Не удалось получить изображение. Попробуй отправить фото ещё раз.")
@@ -890,7 +577,12 @@ class GreekTeacherAgent:
         result: Optional[ImageTextResult] = None
 
         try:
-            result = await self._extract_greek_text_from_image(image_bytes, chat_id=chat.id)
+            result = await extract_greek_text_from_image(
+                self._client,
+                self._vision_model,
+                image_bytes,
+                chat_id=chat.id,
+            )
         except RuntimeError:
             recognition_failed = True
             LOGGER.exception("Image recognition failed for chat %s.", chat.id)
@@ -920,7 +612,7 @@ class GreekTeacherAgent:
         conversation_prompt: Optional[str] = None
 
         if caption_text:
-            conversation_prompt = self._build_photo_prompt(caption_text, result)
+            conversation_prompt = build_photo_prompt(caption_text, result)
             caption_task = asyncio.create_task(self._typing_indicator(chat.id, context))
             try:
                 assistant_reply = await self._generate_response(chat.id, conversation_prompt)
@@ -935,10 +627,29 @@ class GreekTeacherAgent:
         if assistant_reply:
             assistant_reply = self._strip_add_card_prompts(assistant_reply).strip()
 
-        selected_words, missing_words, words_checked = await self._analyze_image_words(chat.id, result)
-        flashcard_section = self._format_image_flashcard_section(selected_words, missing_words, words_checked)
+        common_lookup: Set[str] = self._get_common_word_lookup() or set()
+        unique_words = collect_unique_image_words(
+            result,
+            normalize_term=self._normalize_greek_term,
+            common_lookup=common_lookup,
+            is_probable_proper_noun=self._is_probable_proper_noun,
+        )
+        selected_words = select_image_words_for_review(unique_words)
+        selected_words, missing_words, words_checked = await analyze_image_words(
+            chat.id,
+            selected_words,
+            can_check_flashcards=self._session_factory is not None and self._flashcard_workflow is not None,
+            user_has_active_flashcard=self._user_has_active_flashcard,
+        )
+        flashcard_section = format_image_flashcard_section(
+            selected_words,
+            missing_words,
+            checked=words_checked,
+            normalize_term=self._normalize_greek_term,
+            escape_html=self._escape_html,
+        )
 
-        reply_sections: List[str] = [self._format_image_result_message(result)]
+        reply_sections: List[str] = [format_image_result_message(result, self._escape_html)]
         if assistant_reply:
             reply_sections.append("<b>Ответ на запрос:</b>\n" + self._convert_markdown_to_html(assistant_reply))
         if caption_notice:

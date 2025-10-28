@@ -87,7 +87,7 @@ Automated checks run in `.github/workflows/ci.yml`. The workflow installs depend
 ## Project Structure
 
 - `src/app/`: Application configuration (`settings.py`) and runtime bootstrap (`runtime.py`).
-- `src/bot/`: Telegram agent, message handlers, and wiring to the Telegram SDK.
+- `src/bot/`: Telegram agent, message handlers, and wiring to the Telegram SDK, plus supporting components (`agent_components/image_support.py` holds image-processing helpers).
 - `src/db/`: SQLAlchemy models, migration utilities, and persistence helpers.
 - `src/services/`: Integrations with third-party providers such as OpenAI.
 - `tests/`: Pytest-based test suite.
