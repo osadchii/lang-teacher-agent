@@ -24,6 +24,7 @@
 - Prefer well-scoped helpers and shared prompt builders instead of duplicating near-identical strings or workflows.
 - Document public functions and complex prompts with concise docstrings or comments that explain intent, inputs, and failure modes.
 - Remove obsolete code paths, unused imports, and dead prompts so only live tokens remain in the repository and runtime context.
+- When editing localisation assets, verify Russian text survives encoding changes (UTF-8) and displays correctly in prompts, tests, and UI strings.
 
 ### Quality & Handover
 - Run the relevant automated checks (`pytest`, lint, type checks, Docker build) that cover the changed area and note any gaps in the final message.

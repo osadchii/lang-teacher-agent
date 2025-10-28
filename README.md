@@ -82,7 +82,7 @@ Automated checks run in `.github/workflows/ci.yml`. The workflow installs depend
 ## Additional Documentation
 
 - `PROJECT_DESCRIPTION.md` records the current architecture and directory structure.
-- `AGENTS.md` captures collaboration rules, token-efficient development practices, and expectations for professional user communication.
+- `AGENTS.md` captures collaboration rules, token-efficient development practices, localisation safeguards, and expectations for professional user communication.
 
 ## Project Structure
 
