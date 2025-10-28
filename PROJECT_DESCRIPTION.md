@@ -33,4 +33,5 @@ Lang Teacher Agent is an AI tutor focused on helping learners practice Greek thr
 Every time the project changes, maintainers must:
 - Update `README.md` so onboarding instructions stay accurate.
 - Update `PROJECT_DESCRIPTION.md` so this document reflects the latest architecture and structure.
+- Follow the development rules in `AGENTS.md` to keep the codebase token-efficient and uphold professional user communication.
 Changes are not complete until both documents have been reviewed and amended accordingly.

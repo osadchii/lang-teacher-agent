@@ -3,6 +3,7 @@
 Lang Teacher Agent is an AI-powered tutor that helps learners practise the Greek language. The application exposes its functionality through a Telegram bot and is built with Python, Docker, and PostgreSQL.
 
 ## Overview
+
 - Telegram bot that connects to OpenAI's Responses API to deliver explanations, translations, and pronunciation guidance.
 - Remembers the last five user messages and assistant replies per chat so learners can ask follow-up questions without repeating context (configurable through `TEACHER_HISTORY_SIZE`).
 - Persists Telegram user identifiers and profile details in PostgreSQL, capturing the first time a learner contacts the bot.
@@ -13,11 +14,13 @@ Lang Teacher Agent is an AI-powered tutor that helps learners practise the Greek
 - Structured Python packages (`src/app`, `src/bot`, `src/db`, `src/services`) keep configuration, runtime wiring, and external integrations isolated.
 
 ## Prerequisites
+
 - Python 3.11+
 - pip (examples below use pip)
 - Docker and Docker Compose (optional, for containerized runs)
 
 ## Local Setup
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\Activate.ps1
@@ -40,12 +43,14 @@ python -m src.main
 ```
 
 ## Database & Migrations
+
 - Alembic migrations live in the `migrations/` directory and are configured via `alembic.ini`.
 - On startup the bot calls `alembic upgrade head` (through `src.db.run_migrations_if_needed`) so the schema is always up to date.
 - To create a new migration, run `alembic revision --autogenerate -m "describe change"` with the virtual environment activated, review the generated script, and commit it alongside the relevant model changes.
 - Flashcards are stored in three tables: shared card definitions (`flashcards`), user-specific scheduling metadata (`user_flashcards`), and review history (`flashcard_reviews`).
 
 ## Flashcards
+
 - Ask the bot to save vocabulary in free-form text (e.g. “Добавь слово λόγος в карточки”). The bot calls OpenAI to generate translations and example sentences and confirms the new cards.
 - By default the bot adds only the primary translation from the latest explanation when a learner writes a generic follow-up such as “добавь в карточки”. Additional synonyms, grammatical forms, or variants are stored only if the learner explicitly lists the Greek terms or asks to save all variants.
 - Every outgoing bot message includes the "Взять карточку" button. Press it to receive the next due card; the bot randomly decides whether to surface the term or its translation first and hides the remainder of the card.
@@ -53,26 +58,34 @@ python -m src.main
 - After revealing the answer, choose a 1-5 score. The scheduling algorithm (simplified SM-2) adjusts how soon the card will return: higher scores push the card further into the future, while low scores reschedule it sooner.
 
 ## Testing
+
 ```bash
 pytest
 ```
 
 ## VS Code
+
 Open the folder in VS Code to pick up `.vscode/launch.json`. Use the **Lang Teacher Agent (local)** configuration to debug `src.main` with environment variables from `.env`. To run the Docker stack from VS Code, trigger the `docker-compose: up` task (`Terminal → Run Task…`).
 
 ## Docker Usage
+
 Build and run the services (application + PostgreSQL) with:
+
 ```bash
 docker compose up --build
 ```
 
 ## Continuous Integration
+
 Automated checks run in `.github/workflows/ci.yml`. The workflow installs dependencies, runs the test suite, and builds the Docker image to ensure each change keeps the project healthy.
 
 ## Additional Documentation
+
 - `PROJECT_DESCRIPTION.md` records the current architecture and directory structure.
-- `CODEX_RULES.md` captures collaboration rules for future Codex sessions.
+- `AGENTS.md` captures collaboration rules, token-efficient development practices, and expectations for professional user communication.
+
 ## Project Structure
+
 - `src/app/`: Application configuration (`settings.py`) and runtime bootstrap (`runtime.py`).
 - `src/bot/`: Telegram agent, message handlers, and wiring to the Telegram SDK.
 - `src/db/`: SQLAlchemy models, migration utilities, and persistence helpers.
